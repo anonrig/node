@@ -10,6 +10,8 @@ const bench = common.createBenchmark(main, {
     'file:///dev/null',
     'file:///dev/null?key=param&bool',
     'file:///dev/null?key=param&bool#hash',
+    'file:///Users/anonrig/Developer/node?key=param&bool#hash',
+    'file:///Users/anonrig/Developer/node%20project/path?hello=world#hash',
   ],
   method: isWindows ? [
     'fileURLToPath',
