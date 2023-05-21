@@ -32,8 +32,10 @@
 #include "tracing/trace_event.h"
 
 #include "req_wrap-inl.h"
+#include "simdjson.h"
 #include "stream_base-inl.h"
 #include "string_bytes.h"
+#include "v8-primitive.h"
 
 #include <fcntl.h>
 #include <sys/types.h>
@@ -1079,41 +1081,101 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
   }
 
   const size_t size = offset - start;
-  char* p = &chars[start];
-  char* pe = &chars[size];
-  char* pos[2];
-  char** ppos = &pos[0];
+  simdjson::ondemand::parser parser;
+  auto document = parser.iterate(&chars[start], size, sizeof(&chars[start]));
+  simdjson::ondemand::object obj;
 
-  while (p < pe) {
-    char c = *p++;
-    if (c == '\\' && p < pe && *p == '"') p++;
-    if (c != '"') continue;
-    *ppos++ = p;
-    if (ppos < &pos[2]) continue;
-    ppos = &pos[0];
+  if (document.get_object().get(obj)) {
+    args.GetReturnValue().Set(Array::New(isolate));
+    return;
+  }
 
-    char* s = &pos[0][0];
-    char* se = &pos[1][-1];  // Exclude quote.
-    size_t n = se - s;
+  auto js_string = [&](std::string_view sv) {
+    return ToV8Value(env->context(), sv, isolate).ToLocalChecked();
+  };
 
-    if (n == 4) {
-      if (0 == memcmp(s, "main", 4)) break;
-      if (0 == memcmp(s, "name", 4)) break;
-      if (0 == memcmp(s, "type", 4)) break;
-    } else if (n == 7) {
-      if (0 == memcmp(s, "exports", 7)) break;
-      if (0 == memcmp(s, "imports", 7)) break;
+  bool includes_keys{false};
+  Local<Value> name = Undefined(isolate);
+  Local<Value> main = Undefined(isolate);
+  Local<Value> exports = Undefined(isolate);
+  Local<Value> imports = Undefined(isolate);
+  Local<Value> type = Undefined(isolate);
+  bool should_parse_exports{false};
+  bool should_parse_imports{false};
+
+  // Check for "name" field
+  std::string_view name_value{};
+  if (!obj["name"].get_string().get(name_value)) {
+    name = js_string(name_value);
+    includes_keys = true;
+  }
+
+  // Check for "main" field
+  std::string_view main_value{};
+  if (!obj["main"].get_string().get(main_value)) {
+    main = js_string(main_value);
+    includes_keys = true;
+  }
+
+  // Check for "exports" field
+  simdjson::ondemand::json_type exports_type{};
+  if (!obj["exports"].type().get(exports_type)) {
+    std::string_view exports_value{};
+    if (exports_type == simdjson::ondemand::json_type::string) {
+      if (!obj["exports"].get_string().get(exports_value)) {
+        exports = js_string(exports_value);
+        includes_keys = true;
+      }
+    } else if (exports_type == simdjson::ondemand::json_type::object) {
+      simdjson::ondemand::object subobject;
+      if (!obj["exports"].get_object().get(subobject)) {
+        if (!subobject.raw_json().get(exports_value)) {
+          exports = js_string(exports_value);
+          should_parse_exports = true;
+          includes_keys = true;
+        }
+      }
     }
   }
 
+  // Check for "imports" field
+  simdjson::ondemand::json_type imports_type{};
+  if (!obj["imports"].type().get(imports_type)) {
+    std::string_view imports_value{};
+    if (imports_type == simdjson::ondemand::json_type::string) {
+      if (!obj["imports"].get_string().get(imports_value)) {
+        imports = js_string(imports_value);
+        includes_keys = true;
+      }
+    } else if (imports_type == simdjson::ondemand::json_type::object) {
+      simdjson::ondemand::object subobject;
+      if (!obj["imports"].get_object().get(subobject)) {
+        if (!subobject.raw_json().get(imports_value)) {
+          imports = js_string(imports_value);
+          should_parse_exports = true;
+          includes_keys = true;
+        }
+      }
+    }
+  }
+
+  std::string_view type_value{};
+  if (!obj["type"].get(type_value)) {
+    type = js_string(type_value);
+    includes_keys = true;
+  }
 
   Local<Value> return_value[] = {
-    String::NewFromUtf8(isolate,
-                        &chars[start],
-                        v8::NewStringType::kNormal,
-                        size).ToLocalChecked(),
-    Boolean::New(isolate, p < pe ? true : false)
+      Boolean::New(isolate, includes_keys),
+      name,
+      main,
+      exports,
+      imports,
+      type,
+      Boolean::New(isolate, should_parse_exports),
+      Boolean::New(isolate, should_parse_imports),
   };
+
   args.GetReturnValue().Set(
     Array::New(isolate, return_value, arraysize(return_value)));
 }
