@@ -22,6 +22,7 @@
 #include "aliased_buffer-inl.h"
 #include "memory_tracker-inl.h"
 #include "node_buffer.h"
+#include "node_errors.h"
 #include "node_external_reference.h"
 #include "node_file-inl.h"
 #include "node_process-inl.h"
@@ -29,6 +30,7 @@
 #include "permission/permission.h"
 #include "util-inl.h"
 
+#include "simdjson.h"
 #include "tracing/trace_event.h"
 
 #include "req_wrap-inl.h"
@@ -1079,39 +1081,194 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
   }
   const size_t size = offset - start;
 
-  // TODO(anonrig): Follow-up on removing the following changes for AIX.
-  char* p = &chars[start];
-  char* pe = &chars[size];
-  char* pos[2];
-  char** ppos = &pos[0];
+  simdjson::ondemand::parser parser;
+  // Performance hint:
+  // A padded_string_view is a string_view can be faster than a
+  // padded_string because it does not require a copy!!!
+  simdjson::padded_string_view json_string(
+      chars.data() + start, size, chars.capacity() - start);
+  simdjson::ondemand::document document;
+  // Hint: we are going to require that the JSON document contain an object at
+  // its root.
+  simdjson::ondemand::object main_object;
+  simdjson::error_code error = parser.iterate(json_string).get(document);
 
-  while (p < pe) {
-    char c = *p++;
-    if (c == '\\' && p < pe && *p == '"') p++;
-    if (c != '"') continue;
-    *ppos++ = p;
-    if (ppos < &pos[2]) continue;
-    ppos = &pos[0];
+  // Hint: check for error before using the document.
+  if (error) {
+    args.GetReturnValue().Set(Array::New(isolate));
+    return;
+  }
+  error = document.get_object().get(main_object);
+  if (error) {
+    args.GetReturnValue().Set(Array::New(isolate));
+    return;
+  }
 
-    char* s = &pos[0][0];
-    char* se = &pos[1][-1];  // Exclude quote.
-    size_t n = se - s;
+  // Performance hint: instead of querying the field names one by one, scan the
+  // document just once.
 
-    if (n == 4) {
-      if (0 == memcmp(s, "main", 4)) break;
-      if (0 == memcmp(s, "name", 4)) break;
-      if (0 == memcmp(s, "type", 4)) break;
-    } else if (n == 7) {
-      if (0 == memcmp(s, "exports", 7)) break;
-      if (0 == memcmp(s, "imports", 7)) break;
+  std::string name, main, exports, imports;
+  bool includes_keys{false};
+  bool parse_exports{false};
+  bool parse_imports{false};
+  std::string_view type_value = "none";
+
+  simdjson::ondemand::raw_json_string field_key;
+
+  for (auto field : main_object) {
+    error = field.key().get(field_key);
+    if (error) {
+      args.GetReturnValue().Set(Array::New(isolate));
+      return;
+    }
+    if (field_key == "name") {
+      simdjson::ondemand::value value;
+      error = field.value().get(value);
+      if (error) {
+        args.GetReturnValue().Set(Array::New(isolate));
+        return;
+      }
+
+      std::string_view name_value{};
+      error = value.get_string().get(name_value);
+      if (!error) {
+        name.assign(name_value);
+        includes_keys = true;
+      }
+    } else if (field_key == "main") {
+      simdjson::ondemand::value value;
+      error = field.value().get(value);
+      if (error) {
+        args.GetReturnValue().Set(Array::New(isolate));
+        return;
+      }
+      std::string_view main_value{};
+      error = value.get_string().get(main_value);
+      if (!error) {
+        main.assign(main_value);
+        includes_keys = true;
+      }
+    } else if (field_key == "exports") {
+      simdjson::ondemand::value value;
+      error = field.value().get(value);
+      if (error) {
+        args.GetReturnValue().Set(Array::New(isolate));
+        return;
+      }
+      simdjson::ondemand::json_type exports_json_type;
+      error = value.type().get(exports_json_type);
+      if (!error) {
+        std::string_view exports_value;
+        switch (exports_json_type) {
+          case simdjson::ondemand::json_type::object: {
+            simdjson::ondemand::object exports_object;
+            if (!value.get_object().get(exports_object)) {
+              if (!exports_object.raw_json().get(exports_value)) {
+                exports.reserve(
+                    exports_value.size() +
+                    simdjson::SIMDJSON_PADDING);  // pad so that later we can
+                                                  // use simdjson if needed
+                exports.assign(exports_value);
+                includes_keys = true;
+                parse_exports = true;
+              }
+            }
+            break;
+          }
+          case simdjson::ondemand::json_type::string: {
+            if (!value.get_string().get(exports_value)) {
+              exports.assign(exports_value);
+              includes_keys = true;
+            }
+            break;
+          }
+          default: {
+            // do nothing
+          }
+        }
+      }
+    } else if (field_key == "imports") {
+      simdjson::ondemand::value value;
+      error = field.value().get(value);
+      if (error) {
+        args.GetReturnValue().Set(Array::New(isolate));
+        return;
+      }
+      simdjson::ondemand::json_type imports_json_type;
+      error = value.type().get(imports_json_type);
+      if (!error) {
+        std::string_view imports_value;
+        switch (imports_json_type) {
+          case simdjson::ondemand::json_type::object: {
+            simdjson::ondemand::object imports_object;
+            if (!value.get_object().get(imports_object)) {
+              if (!imports_object.raw_json().get(imports_value)) {
+                imports.reserve(
+                    imports_value.size() +
+                    simdjson::SIMDJSON_PADDING);  // pad so that later we can
+                                                  // use simdjson if needed
+                imports.assign(imports_value);
+                includes_keys = true;
+                parse_imports = true;
+              }
+            }
+            break;
+          }
+          case simdjson::ondemand::json_type::string: {
+            if (!value.get_string().get(imports_value)) {
+              imports.assign(imports_value);
+              includes_keys = true;
+            }
+            break;
+          }
+          default: {
+            // do nothing
+          }
+        }
+      }
+    } else if (field_key == "type") {
+      simdjson::ondemand::value value;
+      error = field.value().get(value);
+      if (error) {
+        args.GetReturnValue().Set(Array::New(isolate));
+        return;
+      }
+      // Check for "type" field
+      error = value.get_string().get(type_value);
+      if (!error) {
+        // Ignore unknown types for forwards compatibility
+        if (type_value != "module" && type_value != "commonjs") {
+          type_value = "none";
+        }
+        includes_keys = true;
+      }
+    } else {
+      // skip unknown fields
     }
   }
 
+  auto js_string = [&](std::string_view sv) {
+    return ToV8Value(env->context(), sv, isolate).ToLocalChecked();
+  };
+
   Local<Value> return_value[] = {
-      String::NewFromUtf8(
-          isolate, &chars[start], v8::NewStringType::kNormal, size)
-          .ToLocalChecked(),
-      Boolean::New(isolate, p < pe ? true : false)};
+      js_string(name),
+      js_string(main),
+      js_string(exports),
+      js_string(imports),
+      js_string(type_value),
+      Boolean::New(isolate, parse_exports),
+      Boolean::New(isolate, parse_imports),
+      Boolean::New(isolate, includes_keys),
+  };
+
+  if (exports.empty()) {
+    return_value[2] = Undefined(isolate);
+  }
+
+  if (imports.empty()) {
+    return_value[3] = Undefined(isolate);
+  }
 
   args.GetReturnValue().Set(
       Array::New(isolate, return_value, arraysize(return_value)));
