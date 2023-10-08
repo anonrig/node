@@ -106,11 +106,21 @@ provides interoperability between them and its original module format,
 
 Node.js has two module systems: [CommonJS][] modules and ECMAScript modules.
 
-Authors can tell Node.js to use the ECMAScript modules loader via the `.mjs`
-file extension, the `package.json` [`"type"`][] field, the [`--input-type`][]
-flag, or the [`--experimental-default-type`][] flag. Outside of those cases,
-Node.js will use the CommonJS module loader. See [Determining module system][]
-for more details.
+Authors can tell Node.js to interpret JavaScript as an ES module via the `.mjs`
+file extension, the `package.json` [`"type"`][] field with a value `"module"`,
+the [`--input-type`][] flag with a value of `"module"`, or the
+[`--experimental-default-type`][] flag with a value of `"module"`. These are
+explicit markers of code being intended to run as an ES module.
+
+Inversely, authors can tell Node.js to interpret JavaScript as CommonJS via the
+`.cjs` file extension, the `package.json` [`"type"`][] field with a value
+`"commonjs"`, the [`--input-type`][] flag with a value of `"commonjs"`, or the
+[`--experimental-default-type`][] flag with a value of `"commonjs"`.
+
+When code lacks explicit markers for either module system, Node.js will attempt
+to run JavaScript as CommonJS; if it errors due to syntax that is only supported
+in ES modules, it will try again to run the code as an ES module. See
+[Determining module system][] for more details.
 
 <!-- Anchors to make sure old links find a target -->
 
