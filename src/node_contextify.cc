@@ -1139,6 +1139,11 @@ ContextifyScript::ContextifyScript(Environment* env, Local<Object> object)
 
 ContextifyScript::~ContextifyScript() {}
 
+constexpr std::array<std::string_view, 3> esm_syntax_error_messages = {
+    "Cannot use import statement outside a module",
+    "Unexpected token 'export'",
+    "Cannot use 'import.meta' outside a module"};
+
 void ContextifyContext::CompileFunction(
     const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -1200,10 +1205,9 @@ void ContextifyContext::CompileFunction(
   }
 
   // Argument 10: Whether to throw errors or return them (optional)
-  bool should_throw_on_error = true;
+  bool should_validate_if_error_is_esm_syntax = false;
   if (!args[9]->IsUndefined()) {
-    CHECK(args[9]->IsBoolean());
-    should_throw_on_error = args[9]->BooleanValue(args.GetIsolate());
+    should_validate_if_error_is_esm_syntax = args[9]->IsTrue();
   }
 
   // Read cache from cached data buffer
@@ -1280,10 +1284,20 @@ void ContextifyContext::CompileFunction(
   if (!maybe_fn.ToLocal(&fn)) {
     if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
       errors::DecorateErrorStack(env, try_catch);
-      if (should_throw_on_error)
-        try_catch.ReThrow();
-      else
-        args.GetReturnValue().Set(try_catch.Exception());
+      if (should_validate_if_error_is_esm_syntax) {
+        Utf8Value message_value(env->isolate(), try_catch.Message()->Get());
+        auto message = message_value.ToStringView();
+
+        for (const auto& error_message : esm_syntax_error_messages) {
+          if (message.find(error_message) != std::string_view::npos) {
+            return args.GetReturnValue().Set(true);
+          }
+        }
+
+        return args.GetReturnValue().Set(false);
+      }
+
+      args.GetReturnValue().Set(try_catch.Exception());
     }
     return;
   }
