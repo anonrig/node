@@ -1199,6 +1199,13 @@ void ContextifyContext::CompileFunction(
     params_buf = args[8].As<Array>();
   }
 
+  // Argument 10: Whether to throw errors or return them (optional)
+  bool should_throw_on_error = true;
+  if (!args[9]->IsUndefined()) {
+    CHECK(args[9]->IsBoolean());
+    should_throw_on_error = args[9]->BooleanValue(args.GetIsolate());
+  }
+
   // Read cache from cached data buffer
   ScriptCompiler::CachedData* cached_data = nullptr;
   if (!cached_data_buf.IsEmpty()) {
@@ -1273,7 +1280,10 @@ void ContextifyContext::CompileFunction(
   if (!maybe_fn.ToLocal(&fn)) {
     if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
       errors::DecorateErrorStack(env, try_catch);
-      try_catch.ReThrow();
+      if (should_throw_on_error)
+        try_catch.ReThrow();
+      else
+        args.GetReturnValue().Set(try_catch.Exception());
     }
     return;
   }

@@ -1027,7 +1027,9 @@ changes:
     * Returns: {Module Namespace Object|vm.Module} Returning a `vm.Module` is
       recommended in order to take advantage of error tracking, and to avoid
       issues with namespaces that contain `then` function exports.
-* Returns: {Function}
+  * `shouldThrowOnError` {boolean} Whether compilation errors will be thrown or
+    returned. **Default:** `true`.
+* Returns: {Function | Error}
 
 Compiles the given code into the provided context (if no context is
 supplied, the current context is used), and returns it wrapped inside a
