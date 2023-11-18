@@ -374,6 +374,18 @@ For example, to run a module with "development" resolutions:
 node -C development app.js
 ```
 
+### `--config-file=path`
+
+> Stability: 1.1 - Active development
+
+<!-- YAML
+added: REPLACEME
+-->
+
+Write a documentation for here.
+- Mention the order of preferrence for environment variables, config file, and command line arguments.
+- Mention the JSON schema.
+
 ### `--cpu-prof`
 
 <!-- YAML

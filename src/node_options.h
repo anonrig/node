@@ -125,6 +125,8 @@ class EnvironmentOptions : public Options {
   std::vector<std::string> allow_fs_write;
   bool allow_child_process = false;
   bool allow_worker_threads = false;
+  std::string config_file;
+  bool has_config_file_string = false;
   bool experimental_repl_await = true;
   bool experimental_vm_modules = false;
   bool expose_internals = false;
