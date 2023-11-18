@@ -20,6 +20,7 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "node.h"
+#include "node_config_file.h"
 #include "node_dotenv.h"
 
 // ========== local headers ==========
@@ -30,6 +31,7 @@
 #include "memory_tracker-inl.h"
 #include "node_binding.h"
 #include "node_builtins.h"
+#include "node_config_file.h"
 #include "node_errors.h"
 #include "node_internals.h"
 #include "node_main_instance.h"
@@ -144,6 +146,10 @@ namespace per_process {
 // node_dotenv.h
 // Instance is used to store environment variables including NODE_OPTIONS.
 node::Dotenv dotenv_file = Dotenv();
+
+// node_config_file.h
+// Instance is used to store configuration variables.
+node::ConfigFile config_file = ConfigFile();
 
 // node_revert.h
 // Bit flag used to track security reverts.
@@ -858,13 +864,18 @@ static ExitCode InitializeNodeWithArgsInternal(
   HandleEnvOptions(per_process::cli_options->per_isolate->per_env);
 
   std::string node_options;
-  auto file_paths = node::Dotenv::GetPathFromArgs(*argv);
+  // TODO(@anonrig): Prefer what to choose.
+  //   - Environment variable
+  //   - Config file
+  //   - Dotenv file
+  auto config_file_path = node::ConfigFile::GetPathFromArgs(*argv);
+  auto dotenv_file_paths = node::Dotenv::GetPathFromArgs(*argv);
 
-  if (!file_paths.empty()) {
+  if (!dotenv_file_paths.empty()) {
     CHECK(!per_process::v8_initialized);
     auto cwd = Environment::GetCwd(Environment::GetExecPath(*argv));
 
-    for (const auto& file_path : file_paths) {
+    for (const auto& file_path : dotenv_file_paths) {
       std::string path = cwd + kPathSeparator + file_path;
       auto path_exists = per_process::dotenv_file.ParsePath(path);
 

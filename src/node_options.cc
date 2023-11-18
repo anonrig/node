@@ -342,6 +342,10 @@ DebugOptionsParser::DebugOptionsParser() {
 }
 
 EnvironmentOptionsParser::EnvironmentOptionsParser() {
+  AddOption("--config-file",
+            "set node.js configuration from supplied file",
+            &EnvironmentOptions::env_file);
+  Implies("--config-file", "[has_config_file_string]");
   AddOption("--conditions",
             "additional user conditions for conditional exports and imports",
             &EnvironmentOptions::conditions,
