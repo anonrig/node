@@ -42,6 +42,7 @@
 #include "node_revert.h"
 #include "node_sea.h"
 #include "node_snapshot_builder.h"
+#include "node_task_runner.h"
 #include "node_v8_platform-inl.h"
 #include "node_version.h"
 
@@ -407,10 +408,6 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
 
   if (env->options()->watch_mode) {
     return StartExecution(env, "internal/main/watch_mode");
-  }
-
-  if (!first_argv.empty() && first_argv == "run") {
-    return StartExecution(env, "internal/main/run");
   }
 
   if (!first_argv.empty() && first_argv != "-") {
@@ -1063,6 +1060,13 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
   }
 
   if (!(flags & ProcessInitializationFlags::kNoPrintHelpOrVersionOutput)) {
+    if (args.size() >= 2 && args[1] == "run") {
+      result->exit_code_ = ExitCode::kNoFailure;
+      task_runner::RunTask(result, "", args);
+      result->early_return_ = true;
+      return result;
+    }
+
     if (per_process::cli_options->print_version) {
       printf("%s\n", NODE_VERSION);
       result->exit_code_ = ExitCode::kNoFailure;
