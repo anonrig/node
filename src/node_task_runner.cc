@@ -6,9 +6,9 @@
 namespace node::task_runner {
 
 #ifdef _WIN32
-static constexpr char bin_path[] = "\\node_modules\\.bin";
+static constexpr const char* bin_path = "\\node_modules\\.bin";
 #else
-static constexpr char bin_path[] = "/node_modules/.bin";
+static constexpr const char* bin_path = "/node_modules/.bin";
 #endif  // _WIN32
 
 ProcessRunner::ProcessRunner(
@@ -69,25 +69,24 @@ ProcessRunner::ProcessRunner(
   // ProcessRunner instance.
   for (int i = 0; i < env_count; i++) {
     std::string name = env_items[i].name;
-    std::string value = env_items[i].value;
+    auto value = env_items[i].value;
 
 #ifdef _WIN32
     // We use comspec environment variable to find cmd.exe path on Windows
     // Example: 'C:\\Windows\\system32\\cmd.exe'
     // If we don't find it, we fallback to 'cmd.exe' for Windows
-    if (name.size() == 7 && StringEqualNoCaseN(name.c_str(), "comspec", 7)) {
+    if (StringEqualNoCase(name.c_str(), "comspec")) {
       file_ = value;
     }
 #endif  // _WIN32
 
     // Check if environment variable key is matching case-insensitive "path"
-    if (name.size() == 4 && StringEqualNoCaseN(name.c_str(), "path", 4)) {
-      value.insert(0, current_bin_path);
+    if (StringEqualNoCase(name.c_str(), "path")) {
+      env_vars_.push_back(name + "=" + current_bin_path);
+    } else {
+      // Environment variables should be in "KEY=value" format
+      env_vars_.push_back(name + "=" + value);
     }
-
-    // Environment variables should be in "KEY=value" format
-    value.insert(0, name + "=");
-    env_vars_.push_back(value);
   }
   uv_os_free_environ(env_items, env_count);
 
@@ -95,7 +94,10 @@ ProcessRunner::ProcessRunner(
   options_.file = file_.c_str();
 
 #ifdef _WIN32
-  if (file_.find("cmd.exe") != std::string::npos) {
+  // We check whether file_ ends with cmd.exe in a case-insensitive manner.
+  // C++20 provides ends_with, but we roll our own for compatibility.
+  const char * cmdexe = "cmd.exe";
+  if (file_.size() >= strlen(cmdexe) && StringEqualNoCase(cmdexe, file_.c_str() + file_.size() - strlen(cmdexe))) {
     // If the file is cmd.exe, use the following command line arguments:
     // "/c" Carries out the command and exit.
     // "/d" Disables execution of AutoRun commands.
@@ -104,6 +106,8 @@ ProcessRunner::ProcessRunner(
     command_args_ = {
         options_.file, "/d", "/s", "/c", "\"" + command_str + "\""};
   } else {
+    // If the file is not cmd.exe, and it is unclear wich shell is being used, so
+    // assume -c is the correct syntax (Unix-like shells use -c for this purpose).
     command_args_ = {options_.file, "-c", command_str};
   }
 #else
