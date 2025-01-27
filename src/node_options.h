@@ -126,6 +126,7 @@ class EnvironmentOptions : public Options {
   bool experimental_websocket = true;
   bool experimental_sqlite = true;
   bool experimental_webstorage = false;
+  bool experimental_quic = false;
   std::string localstorage_file;
   bool experimental_global_navigator = true;
   bool experimental_global_web_crypto = true;
@@ -247,7 +248,7 @@ class EnvironmentOptions : public Options {
 
   std::vector<std::string> preload_esm_modules;
 
-  bool experimental_strip_types = false;
+  bool experimental_strip_types = true;
   bool experimental_transform_types = false;
 
   std::vector<std::string> user_argv;

@@ -420,8 +420,8 @@ By default, Node.js will run all files matching these patterns:
 * `**/test.{cjs,mjs,js}`
 * `**/test/**/*.{cjs,mjs,js}`
 
-When [`--experimental-strip-types`][] is supplied, the following
-additional patterns are matched:
+Unless [`--no-experimental-strip-types`][] is supplied, the following
+additional patterns are also matched:
 
 * `**/*.test.{cts,mts,ts}`
 * `**/*-test.{cts,mts,ts}`
@@ -932,7 +932,13 @@ test('runs timers as setTime passes ticks', (context) => {
 
 ## Snapshot testing
 
-> Stability: 1.0 - Early development
+<!-- YAML
+added: v22.3.0
+changes:
+  - version: v23.4.0
+    pr-url: https://github.com/nodejs/node/pull/55897
+    description: Snapsnot testing is no longer experimental.
+-->
 
 Snapshot tests allow arbitrary values to be serialized into string values and
 compared against a set of known good values. The known good values are known as
@@ -1744,13 +1750,34 @@ describe('tests', async () => {
 });
 ```
 
+## `assert`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+An object whose methods are used to configure available assertions on the
+`TestContext` objects in the current process. The methods from `node:assert`
+and snapshot testing functions are available by default.
+
+It is possible to apply the same configuration to all files by placing common
+configuration code in a module
+preloaded with `--require` or `--import`.
+
+### `assert.register(name, fn)`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+Defines a new assertion function with the provided name and function. If an
+assertion already exists with the same name, it is overwritten.
+
 ## `snapshot`
 
 <!-- YAML
 added: v22.3.0
 -->
-
-> Stability: 1.0 - Early development
 
 An object whose methods are used to configure default snapshot settings in the
 current process. It is possible to apply the same configuration to all files by
@@ -1762,8 +1789,6 @@ placing common configuration code in a module preloaded with `--require` or
 <!-- YAML
 added: v22.3.0
 -->
-
-> Stability: 1.0 - Early development
 
 * `serializers` {Array} An array of synchronous functions used as the default
   serializers for snapshot tests.
@@ -1779,8 +1804,6 @@ more robust serialization mechanism is required, this function should be used.
 <!-- YAML
 added: v22.3.0
 -->
-
-> Stability: 1.0 - Early development
 
 * `fn` {Function} A function used to compute the location of the snapshot file.
   The function receives the path of the test file as its only argument. If the
@@ -2930,6 +2953,7 @@ The corresponding declaration ordered events are `'test:pass'` and `'test:fail'`
     `undefined` if the test was run through the REPL.
   * `name` {string} The test name.
   * `nesting` {number} The nesting level of the test.
+  * `type` {string} The test type. Either `'suite'` or `'test'`.
 
 Emitted when a test is dequeued, right before it is executed.
 This event is not guaranteed to be emitted in the same order as the tests are
@@ -2962,6 +2986,7 @@ defined.
     `undefined` if the test was run through the REPL.
   * `name` {string} The test name.
   * `nesting` {number} The nesting level of the test.
+  * `type` {string} The test type. Either `'suite'` or `'test'`.
 
 Emitted when a test is enqueued for execution.
 
@@ -3261,8 +3286,6 @@ test('test', (t) => {
 added: v22.3.0
 -->
 
-> Stability: 1.0 - Early development
-
 * `value` {any} A value to serialize to a string. If Node.js was started with
   the [`--test-update-snapshots`][] flag, the serialized value is written to
   the snapshot file. Otherwise, the serialized value is compared to the
@@ -3347,7 +3370,9 @@ added:
   - v22.2.0
   - v20.15.0
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55895
     description: This function is no longer experimental.
 -->
@@ -3591,10 +3616,10 @@ added:
 Can be used to abort test subtasks when the test has been aborted.
 
 [TAP]: https://testanything.org/
-[`--experimental-strip-types`]: cli.md#--experimental-strip-types
 [`--experimental-test-coverage`]: cli.md#--experimental-test-coverage
 [`--experimental-test-module-mocks`]: cli.md#--experimental-test-module-mocks
 [`--import`]: cli.md#--importmodule
+[`--no-experimental-strip-types`]: cli.md#--no-experimental-strip-types
 [`--test-concurrency`]: cli.md#--test-concurrency
 [`--test-coverage-exclude`]: cli.md#--test-coverage-exclude
 [`--test-coverage-include`]: cli.md#--test-coverage-include

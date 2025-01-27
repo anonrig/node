@@ -192,7 +192,9 @@ Error: Access to this API has been restricted
 <!-- YAML
 added: v20.0.0
 changes:
-  - version: v23.5.0
+  - version:
+    - v23.5.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/56201
     description: Permission Model and --allow-fs flags are stable.
   - version: v20.7.0
@@ -237,7 +239,9 @@ node --permission --allow-fs-read=/path/to/index.js index.js
 <!-- YAML
 added: v20.0.0
 changes:
-  - version: v23.5.0
+  - version:
+    - v23.5.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/56201
     description: Permission Model and --allow-fs flags are stable.
   - version: v20.7.0
@@ -780,7 +784,7 @@ Any query parameter or hash in the URL will be accessible via [`import.meta.url`
 
 ```bash
 node --entry-url 'file:///path/to/file.js?queryparams=work#and-hashes-too'
-node --entry-url --experimental-strip-types 'file.ts?query#hash'
+node --entry-url 'file.ts?query#hash'
 node --entry-url 'data:text/javascript,console.log("Hello")'
 ```
 
@@ -880,13 +884,13 @@ On Windows, using `cmd.exe` a single quote will not work correctly because it
 only recognizes double `"` for quoting. In Powershell or Git bash, both `'`
 and `"` are usable.
 
-It is possible to run code containing inline types by passing
-[`--experimental-strip-types`][].
+It is possible to run code containing inline types unless the
+[`--no-experimental-strip-types`][] flag is provided.
 
 ### `--experimental-addon-modules`
 
 <!-- YAML
-added: REPLACEME
+added: v23.6.0
 -->
 
 > Stability: 1.0 - Early development
@@ -966,6 +970,14 @@ If the ES module being `require()`'d contains top-level `await`, this flag
 allows Node.js to evaluate the module, try to locate the
 top-level awaits, and print their location to help users find them.
 
+### `--experimental-quic`
+
+<!--
+added: REPLACEME
+-->
+
+Enables the experimental `node:quic` built-in module.
+
 ### `--experimental-require-module`
 
 <!-- YAML
@@ -1008,17 +1020,6 @@ added:
 
 Use this flag to enable [ShadowRealm][] support.
 
-### `--experimental-strip-types`
-
-<!-- YAML
-added: v22.6.0
--->
-
-> Stability: 1.1 - Active development
-
-Enable experimental type-stripping for TypeScript files.
-For more information, see the [TypeScript type-stripping][] documentation.
-
 ### `--experimental-test-coverage`
 
 <!-- YAML
@@ -1059,7 +1060,7 @@ added: v22.7.0
 > Stability: 1.1 - Active development
 
 Enables the transformation of TypeScript-only syntax into JavaScript code.
-Implies `--experimental-strip-types` and `--enable-source-maps`.
+Implies `--enable-source-maps`.
 
 ### `--experimental-vm-modules`
 
@@ -1369,8 +1370,23 @@ added: v12.0.0
 -->
 
 This configures Node.js to interpret `--eval` or `STDIN` input as CommonJS or
-as an ES module. Valid values are `"commonjs"` or `"module"`. The default is
-`"commonjs"`.
+as an ES module. Valid values are `"commonjs"`, `"module"`, `"module-typescript"` and `"commonjs-typescript"`.
+The `"-typescript"` values are not available with the flag `--no-experimental-strip-types`.
+The default is `"commonjs"`.
+
+If `--input-type` is not provided,
+Node.js will try to detect the syntax with the following steps:
+
+1. Run the input as CommonJS.
+2. If step 1 fails, run the input as an ES module.
+3. If step 2 fails with a SyntaxError, strip the types.
+4. If step 3 fails with an error code [`ERR_INVALID_TYPESCRIPT_SYNTAX`][],
+   throw the error from step 2, including the TypeScript error in the message,
+   else run as CommonJS.
+5. If step 4 fails, run the input as an ES module.
+
+To avoid the delay of multiple syntax detection passes, the `--input-type=type` flag can be used to specify
+how the `--eval` input should be interpreted.
 
 The REPL does not support this option. Usage of `--input-type=module` with
 [`--print`][] will throw an error, as `--print` does not support ES module
@@ -1641,12 +1657,29 @@ See [Loading ECMAScript modules using `require()`][].
 <!-- YAML
 added: v22.5.0
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55890
     description: SQLite is unflagged but still experimental.
 -->
 
 Disable the experimental [`node:sqlite`][] module.
+
+### `--no-experimental-strip-types`
+
+<!-- YAML
+added: v22.6.0
+changes:
+  - version: v23.6.0
+    pr-url: https://github.com/nodejs/node/pull/56350
+    description: Type stripping is enabled by default.
+-->
+
+> Stability: 1.1 - Active development
+
+Disable experimental type-stripping for TypeScript files.
+For more information, see the [TypeScript type-stripping][] documentation.
 
 ### `--no-experimental-websocket`
 
@@ -1775,7 +1808,9 @@ developers may leverage to detect deprecated API usage.
 <!-- YAML
 added: v20.0.0
 changes:
-  - version: v23.5.0
+  - version:
+    - v23.5.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/56201
     description: Permission Model is now stable.
 -->
@@ -1933,7 +1968,9 @@ Location at which the report will be generated.
 ### `--report-exclude-env`
 
 <!-- YAML
-added: v23.3.0
+added:
+  - v23.3.0
+  - v22.13.0
 -->
 
 When `--report-exclude-env` is passed the diagnostic report generated will not
@@ -2327,7 +2364,7 @@ finished executing even if the event loop would otherwise remain active.
 <!-- YAML
 added: v22.8.0
 changes:
-  - version: REPLACEME
+  - version: v23.6.0
     pr-url: https://github.com/nodejs/node/pull/56298
     description: This flag was renamed from `--experimental-test-isolation` to
                  `--test-isolation`.
@@ -2454,7 +2491,9 @@ subtests inherit this value from their parent. The default value is `Infinity`.
 <!-- YAML
 added: v22.3.0
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55897
     description: Snapsnot testing is no longer experimental.
 -->
@@ -2572,7 +2611,9 @@ Print stack traces for deprecations.
 ### `--trace-env`
 
 <!-- YAML
-added: v23.4.0
+added:
+  - v23.4.0
+  - v22.13.0
 -->
 
 Print information about any access to environment variables done in the current Node.js
@@ -2595,7 +2636,9 @@ To print the stack trace of the access, use `--trace-env-js-stack` and/or
 ### `--trace-env-js-stack`
 
 <!-- YAML
-added: v23.4.0
+added:
+  - v23.4.0
+  - v22.13.0
 -->
 
 In addition to what `--trace-env` does, this prints the JavaScript stack trace of the access.
@@ -2603,7 +2646,9 @@ In addition to what `--trace-env` does, this prints the JavaScript stack trace o
 ### `--trace-env-native-stack`
 
 <!-- YAML
-added: v23.4.0
+added:
+  - v23.4.0
+  - v22.13.0
 -->
 
 In addition to what `--trace-env` does, this prints the native stack trace of the access.
@@ -2650,6 +2695,7 @@ i.e. invoking `process.exit()`.
 <!-- YAML
 added:
  - v23.5.0
+ - v22.13.0
 -->
 
 Prints information about usage of [Loading ECMAScript modules using `require()`][].
@@ -3069,12 +3115,11 @@ one is included in the list below.
 * `--experimental-json-modules`
 * `--experimental-loader`
 * `--experimental-modules`
-* `--experimental-permission`
 * `--experimental-print-required-tla`
+* `--experimental-quic`
 * `--experimental-require-module`
 * `--experimental-shadow-realm`
 * `--experimental-specifier-resolution`
-* `--experimental-strip-types`
 * `--experimental-test-isolation`
 * `--experimental-top-level-await`
 * `--experimental-transform-types`
@@ -3112,6 +3157,7 @@ one is included in the list below.
 * `--no-experimental-global-navigator`
 * `--no-experimental-repl-await`
 * `--no-experimental-sqlite`
+* `--no-experimental-strip-types`
 * `--no-experimental-websocket`
 * `--no-extra-info-on-fatal-exception`
 * `--no-force-async-hooks-checks`
@@ -3636,10 +3682,10 @@ node --stack-trace-limit=12 -p -e "Error.stackTraceLimit" # prints 12
 [`--env-file`]: #--env-fileconfig
 [`--experimental-addon-modules`]: #--experimental-addon-modules
 [`--experimental-sea-config`]: single-executable-applications.md#generating-single-executable-preparation-blobs
-[`--experimental-strip-types`]: #--experimental-strip-types
 [`--experimental-wasm-modules`]: #--experimental-wasm-modules
 [`--heap-prof-dir`]: #--heap-prof-dir
 [`--import`]: #--importmodule
+[`--no-experimental-strip-types`]: #--no-experimental-strip-types
 [`--openssl-config`]: #--openssl-configfile
 [`--preserve-symlinks`]: #--preserve-symlinks
 [`--print`]: #-p---print-script
@@ -3648,6 +3694,7 @@ node --stack-trace-limit=12 -p -e "Error.stackTraceLimit" # prints 12
 [`AsyncLocalStorage`]: async_context.md#class-asynclocalstorage
 [`Buffer`]: buffer.md#class-buffer
 [`CRYPTO_secure_malloc_init`]: https://www.openssl.org/docs/man3.0/man3/CRYPTO_secure_malloc_init.html
+[`ERR_INVALID_TYPESCRIPT_SYNTAX`]: errors.md#err_invalid_typescript_syntax
 [`NODE_OPTIONS`]: #node_optionsoptions
 [`NO_COLOR`]: https://no-color.org
 [`SlowBuffer`]: buffer.md#class-slowbuffer

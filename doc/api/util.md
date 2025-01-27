@@ -1539,9 +1539,10 @@ changes:
       times. If `true`, all values will be collected in an array. If
       `false`, values for the option are last-wins. **Default:** `false`.
     * `short` {string} A single character alias for the option.
-    * `default` {string | boolean | string\[] | boolean\[]} The default option
-      value when it is not set by args. It must be of the same type as the
-      `type` property. When `multiple` is `true`, it must be an array.
+    * `default` {string | boolean | string\[] | boolean\[]} The default value to
+      be used if (and only if) the option does not appear in the arguments to be
+      parsed. It must be of the same type as the `type` property. When `multiple`
+      is `true`, it must be an array.
   * `strict` {boolean} Should an error be thrown when unknown arguments
     are encountered, or when arguments are passed that do not match the
     `type` configured in `options`.
@@ -1926,7 +1927,9 @@ added:
   - v21.7.0
   - v20.12.0
 changes:
-  - version: v23.5.0
+  - version:
+    - v23.5.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/56265
     description: styleText is now stable.
   - version:

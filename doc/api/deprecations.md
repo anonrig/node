@@ -3779,7 +3779,9 @@ It is recommended to use the `new` qualifier instead. This applies to all REPL c
 
 <!-- YAML
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55892
     description: Documentation-only.
 -->
@@ -3793,7 +3795,9 @@ will throw an error in a future version.
 
 <!-- YAML
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55545
     description: Documentation-only deprecation.
 -->
@@ -3806,7 +3810,9 @@ These properties are unconditionally `true`. Any checks based on these propertie
 
 <!-- YAML
 changes:
-  - version: v23.4.0
+  - version:
+    - v23.4.0
+    - v22.13.0
     pr-url: https://github.com/nodejs/node/pull/55545
     description: Documentation-only deprecation.
 -->

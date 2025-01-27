@@ -28,6 +28,7 @@ using v8::Int32;
 using v8::Isolate;
 using v8::JustVoid;
 using v8::Local;
+using v8::LocalVector;
 using v8::Maybe;
 using v8::MaybeLocal;
 using v8::Nothing;
@@ -95,7 +96,7 @@ void ECDH::GetCurves(const FunctionCallbackInfo<Value>& args) {
   std::vector<EC_builtin_curve> curves(num_curves);
   CHECK_EQ(EC_get_builtin_curves(curves.data(), num_curves), num_curves);
 
-  std::vector<Local<Value>> arr(num_curves);
+  LocalVector<Value> arr(env->isolate(), num_curves);
   std::transform(curves.begin(), curves.end(), arr.begin(), [env](auto& curve) {
     return OneByteString(env->isolate(), OBJ_nid2sn(curve.nid));
   });
@@ -766,16 +767,16 @@ Maybe<void> ExportJWKEcKey(Environment* env,
   const int nid = EC_GROUP_get_curve_name(group);
   switch (nid) {
     case NID_X9_62_prime256v1:
-      crv_name = OneByteString(env->isolate(), "P-256");
+      crv_name = FIXED_ONE_BYTE_STRING(env->isolate(), "P-256");
       break;
     case NID_secp256k1:
-      crv_name = OneByteString(env->isolate(), "secp256k1");
+      crv_name = FIXED_ONE_BYTE_STRING(env->isolate(), "secp256k1");
       break;
     case NID_secp384r1:
-      crv_name = OneByteString(env->isolate(), "P-384");
+      crv_name = FIXED_ONE_BYTE_STRING(env->isolate(), "P-384");
       break;
     case NID_secp521r1:
-      crv_name = OneByteString(env->isolate(), "P-521");
+      crv_name = FIXED_ONE_BYTE_STRING(env->isolate(), "P-521");
       break;
     default: {
       THROW_ERR_CRYPTO_JWK_UNSUPPORTED_CURVE(
