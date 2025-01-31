@@ -1,6 +1,7 @@
-import { isMainThread, hasCrypto, hasIntl } from '../common/index.mjs';
+import { hasCrypto, hasIntl } from '../common/index.mjs';
 import assert from 'node:assert';
 import { builtinModules } from 'node:module';
+import { isMainThread } from 'node:worker_threads';
 
 for (const invalid of [1, undefined, null, false, [], {}, () => {}, Symbol('test')]) {
   assert.throws(() => process.getBuiltinModule(invalid), { code: 'ERR_INVALID_ARG_TYPE' });
@@ -35,6 +36,8 @@ if (!hasIntl) {
   publicBuiltins.delete('inspector');
   publicBuiltins.delete('trace_events');
 }
+// TODO(@jasnell): Remove this once node:quic graduates from unflagged.
+publicBuiltins.delete('node:quic');
 
 for (const id of publicBuiltins) {
   assert.strictEqual(process.getBuiltinModule(id), require(id));

@@ -23,6 +23,7 @@ using v8::FunctionCallbackInfo;
 using v8::Integer;
 using v8::Isolate;
 using v8::Local;
+using v8::LocalVector;
 using v8::Map;
 using v8::Name;
 using v8::Null;
@@ -108,8 +109,12 @@ void PerIsolateOptions::CheckOptions(std::vector<std::string>* errors,
 void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
                                       std::vector<std::string>* argv) {
   if (!input_type.empty()) {
-    if (input_type != "commonjs" && input_type != "module") {
-      errors->push_back("--input-type must be \"module\" or \"commonjs\"");
+    if (input_type != "commonjs" && input_type != "module" &&
+        input_type != "commonjs-typescript" &&
+        input_type != "module-typescript") {
+      errors->push_back(
+          "--input-type must be \"module\","
+          "\"commonjs\", \"module-typescript\" or \"commonjs-typescript\"");
     }
   }
 
@@ -381,6 +386,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             " (default: current working directory)",
             &EnvironmentOptions::diagnostic_dir,
             kAllowedInEnvvar);
+  AddOption("--disable-sigusr1",
+            "Disable inspector thread to be listening for SIGUSR1 signal",
+            &EnvironmentOptions::disable_sigusr1,
+            kAllowedInEnvvar,
+            false);
   AddOption("--dns-result-order",
             "set default value of verbatim in dns.lookup. Options are "
             "'ipv4first' (IPv4 addresses are placed before IPv6 addresses) "
@@ -431,6 +441,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::experimental_sqlite,
             kAllowedInEnvvar,
             true);
+  AddOption("--experimental-quic",
+            "experimental QUIC API",
+            &EnvironmentOptions::experimental_quic,
+            kAllowedInEnvvar);
   AddOption("--experimental-webstorage",
             "experimental Web Storage API",
             &EnvironmentOptions::experimental_webstorage,
@@ -465,7 +479,6 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::permission,
             kAllowedInEnvvar,
             false);
-  AddAlias("--experimental-permission", "--permission");
   AddOption("--allow-fs-read",
             "allow permissions to read the filesystem",
             &EnvironmentOptions::allow_fs_read,
@@ -853,7 +866,8 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--experimental-strip-types",
             "Experimental type-stripping for TypeScript files.",
             &EnvironmentOptions::experimental_strip_types,
-            kAllowedInEnvvar);
+            kAllowedInEnvvar,
+            true);
   AddOption("--experimental-transform-types",
             "enable transformation of TypeScript-only"
             "syntax into JavaScript code",
@@ -1106,6 +1120,10 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             ,
             &PerProcessOptions::use_openssl_ca,
             kAllowedInEnvvar);
+  AddOption("--use-system-ca",
+            "use system's CA store",
+            &PerProcessOptions::use_system_ca,
+            kAllowedInEnvvar);
   AddOption("--use-bundled-ca",
             "use bundled CA store"
 #if !defined(NODE_OPENSSL_CERT_STORE)
@@ -1307,8 +1325,8 @@ void GetCLIOptionsValues(const FunctionCallbackInfo<Value>& args) {
   Mutex::ScopedLock lock(per_process::cli_options_mutex);
   IterateCLIOptionsScope s(env);
 
-  std::vector<Local<Name>> option_names;
-  std::vector<Local<Value>> option_values;
+  LocalVector<Name> option_names(isolate);
+  LocalVector<Value> option_values(isolate);
   option_names.reserve(_ppop_instance.options_.size() * 2);
   option_values.reserve(_ppop_instance.options_.size() * 2);
 

@@ -116,6 +116,7 @@ class EnvironmentOptions : public Options {
   bool abort_on_uncaught_exception = false;
   std::vector<std::string> conditions;
   bool detect_module = true;
+  bool disable_sigusr1 = false;
   bool print_required_tla = false;
   bool require_module = true;
   std::string dns_result_order;
@@ -126,6 +127,7 @@ class EnvironmentOptions : public Options {
   bool experimental_websocket = true;
   bool experimental_sqlite = true;
   bool experimental_webstorage = false;
+  bool experimental_quic = false;
   std::string localstorage_file;
   bool experimental_global_navigator = true;
   bool experimental_global_web_crypto = true;
@@ -247,7 +249,7 @@ class EnvironmentOptions : public Options {
 
   std::vector<std::string> preload_esm_modules;
 
-  bool experimental_strip_types = false;
+  bool experimental_strip_types = true;
   bool experimental_transform_types = false;
 
   std::vector<std::string> user_argv;
@@ -339,6 +341,7 @@ class PerProcessOptions : public Options {
   bool ssl_openssl_cert_store = false;
 #endif
   bool use_openssl_ca = false;
+  bool use_system_ca = false;
   bool use_bundled_ca = false;
   bool enable_fips_crypto = false;
   bool force_fips_crypto = false;

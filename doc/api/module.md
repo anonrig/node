@@ -81,13 +81,17 @@ added: v23.2.0
 * `base` {string|URL} The absolute location (`file:` URL string or FS path) of the
   containing  module. For CJS, use `__filename` (not `__dirname`!); for ESM, use
   `import.meta.url`. You do not need to pass it if `specifier` is an `absolute specifier`.
-* Returns: {string|undefined} A path if the `package.json` is found. When `startLocation`
+* Returns: {string|undefined} A path if the `package.json` is found. When `specifier`
   is a package, the package's root `package.json`; when a relative or unresolved, the closest
-  `package.json` to the `startLocation`.
+  `package.json` to the `specifier`.
 
-> **Caveat**: Do not use this to try to determine module format. There are many things effecting
+> **Caveat**: Do not use this to try to determine module format. There are many things affecting
 > that determination; the `type` field of package.json is the _least_ definitive (ex file extension
-> superceeds it, and a loader hook superceeds that).
+> supersedes it, and a loader hook supersedes that).
+
+> **Caveat**: This currently leverages only the built-in default resolver; if
+> [`resolve` customization hooks][resolve hook] are registered, they will not affect the resolution.
+> This may change in the future.
 
 ```text
 /path/to/project
@@ -174,6 +178,13 @@ added:
   - v18.19.0
 changes:
   - version:
+    - v23.6.1
+    - v22.13.1
+    - v20.18.2
+    pr-url: https://github.com/nodejs-private/node-private/pull/629
+    description: Using this feature with the permission model enabled requires
+                 passing `--allow-worker`.
+  - version:
     - v20.8.0
     - v18.19.0
     pr-url: https://github.com/nodejs/node/pull/49655
@@ -201,6 +212,8 @@ changes:
 Register a module that exports [hooks][] that customize Node.js module
 resolution and loading behavior. See [Customization hooks][].
 
+This feature requires `--allow-worker` if used with the [Permission Model][].
+
 ### `module.registerHooks(options)`
 
 <!-- YAML
@@ -219,7 +232,9 @@ See [Customization hooks][].
 ### `module.stripTypeScriptTypes(code[, options])`
 
 <!-- YAML
-added: v23.2.0
+added:
+  - v23.2.0
+  - v22.13.0
 -->
 
 > Stability: 1.1 - Active development
@@ -1030,13 +1045,14 @@ changes:
 * `nextResolve` {Function} The subsequent `resolve` hook in the chain, or the
   Node.js default `resolve` hook after the last user-supplied `resolve` hook
   * `specifier` {string}
-  * `context` {Object}
+  * `context` {Object|undefined} When omitted, the defaults are provided. When provided, defaults
+    are merged in with preference to the provided properties.
 * Returns: {Object|Promise} The asynchronous version takes either an object containing the
   following properties, or a `Promise` that will resolve to such an object. The
   synchronous version only accepts an object returned synchronously.
-  * `format` {string|null|undefined} A hint to the load hook (it might be
-    ignored)
-    `'builtin' | 'commonjs' | 'json' | 'module' | 'wasm'`
+  * `format` {string|null|undefined} A hint to the `load` hook (it might be ignored). It can be a
+    module format (such as `'commonjs'` or `'module'`) or an arbitrary value like `'css'` or
+    `'yaml'`.
   * `importAttributes` {Object|undefined} The import attributes to use when
     caching the module (optional; if excluded the input will be used)
   * `shortCircuit` {undefined|boolean} A signal that this hook intends to
@@ -1139,12 +1155,14 @@ changes:
 * `context` {Object}
   * `conditions` {string\[]} Export conditions of the relevant `package.json`
   * `format` {string|null|undefined} The format optionally supplied by the
-    `resolve` hook chain
+    `resolve` hook chain. This can be any string value as an input; input values do not need to
+    conform to the list of acceptable return values described below.
   * `importAttributes` {Object}
 * `nextLoad` {Function} The subsequent `load` hook in the chain, or the
   Node.js default `load` hook after the last user-supplied `load` hook
   * `url` {string}
-  * `context` {Object}
+  * `context` {Object|undefined} When omitted, defaults are provided. When provided, defaults are
+    merged in with preference to the provided properties.
 * Returns: {Object|Promise} The asynchronous version takes either an object containing the
   following properties, or a `Promise` that will resolve to such an object. The
   synchronous version only accepts an object returned synchronously.
@@ -1578,6 +1596,20 @@ import { findSourceMap, SourceMap } from 'node:module';
 const { findSourceMap, SourceMap } = require('node:module');
 ```
 
+### `module.getSourceMapsSupport()`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+* Returns: {Object}
+  * `enabled` {boolean} If the source maps support is enabled
+  * `nodeModules` {boolean} If the support is enabled for files in `node_modules`.
+  * `generatedCode` {boolean} If the support is enabled for generated code from `eval` or `new Function`.
+
+This method returns whether the [Source Map v3][Source Map] support for stack
+traces is enabled.
+
 <!-- Anchors to make sure old links find a target -->
 
 <a id="module_module_findsourcemap_path_error"></a>
@@ -1596,6 +1628,31 @@ added:
 
 `path` is the resolved path for the file for which a corresponding source map
 should be fetched.
+
+### `module.setSourceMapsSupport(enabled[, options])`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+* `enabled` {boolean} Enable the source map support.
+* `options` {Object} Optional
+  * `nodeModules` {boolean} If enabling the support for files in
+    `node_modules`. **Default:** `false`.
+  * `generatedCode` {boolean} If enabling the support for generated code from
+    `eval` or `new Function`. **Default:** `false`.
+
+This function enables or disables the [Source Map v3][Source Map] support for
+stack traces.
+
+It provides same features as launching Node.js process with commandline options
+`--enable-source-maps`, with additional options to alter the support for files
+in `node_modules` or generated codes.
+
+Only source maps in JavaScript files that are loaded after source maps has been
+enabled will be parsed and loaded. Preferably, use the commandline options
+`--enable-source-maps` to avoid losing track of source maps of modules loaded
+before this API call.
 
 ### Class: `module.SourceMap`
 
@@ -1696,6 +1753,8 @@ returned object contains the following keys:
 [Conditional exports]: packages.md#conditional-exports
 [Customization hooks]: #customization-hooks
 [ES Modules]: esm.md
+[Permission Model]: permissions.md#permission-model
+[Source Map]: https://sourcemaps.info/spec.html
 [Source map v3 format]: https://sourcemaps.info/spec.html#h.mofvlxcwqzej
 [V8 JavaScript code coverage]: https://v8project.blogspot.com/2017/12/javascript-code-coverage.html
 [V8 code cache]: https://v8.dev/blog/code-caching-for-devs

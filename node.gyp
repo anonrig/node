@@ -146,6 +146,7 @@
       'src/node_trace_events.cc',
       'src/node_types.cc',
       'src/node_url.cc',
+      'src/node_url_pattern.cc',
       'src/node_util.cc',
       'src/node_v8.cc',
       'src/node_wasi.cc',
@@ -275,6 +276,7 @@
       'src/node_stat_watcher.h',
       'src/node_union_bytes.h',
       'src/node_url.h',
+      'src/node_url_pattern.h',
       'src/node_version.h',
       'src/node_v8.h',
       'src/node_v8_platform-inl.h',
@@ -871,8 +873,6 @@
         'openssl_default_cipher_list%': '',
       },
 
-      'cflags': ['-Werror=unused-result'],
-
       'defines': [
         'NODE_ARCH="<(target_arch)"',
         'NODE_PLATFORM="<(OS)"',
@@ -892,6 +892,9 @@
           'defines': [
             'NODE_OPENSSL_DEFAULT_CIPHER_LIST="<(openssl_default_cipher_list)"'
            ]
+        }],
+        [ 'suppress_all_error_on_warn=="false"', {
+          'cflags': ['-Werror=unused-result'],
         }],
         [ 'error_on_warn=="true"', {
           'cflags': ['-Werror'],
@@ -1295,26 +1298,6 @@
         }],
       ],
     }, # embedtest
-
-    {
-      'target_name': 'sqlite_extension',
-      'type': 'shared_library',
-      'sources': [
-        'test/sqlite/extension.c'
-      ],
-
-      'include_dirs': [
-        'test/sqlite',
-        'deps/sqlite',
-      ],
-
-      'cflags': [
-        '-fPIC',
-        '-Wall',
-        '-Wextra',
-        '-O3',
-      ],
-    }, # sqlitetest
 
     {
       'target_name': 'overlapped-checker',

@@ -213,6 +213,10 @@ class DNSInstance {
     this.#records.set(origin.hostname, records)
   }
 
+  deleteRecords (origin) {
+    this.#records.delete(origin.hostname)
+  }
+
   getHandler (meta, opts) {
     return new DNSDispatchHandler(this, meta, opts)
   }
@@ -261,7 +265,7 @@ class DNSDispatchHandler extends DecoratorHandler {
         break
       }
       case 'ENOTFOUND':
-        this.#state.deleteRecord(this.#origin)
+        this.#state.deleteRecords(this.#origin)
       // eslint-disable-next-line no-fallthrough
       default:
         super.onResponseError(controller, err)
@@ -349,7 +353,7 @@ module.exports = interceptorOpts => {
 
       instance.runLookup(origin, origDispatchOpts, (err, newOrigin) => {
         if (err) {
-          return handler.onError(err)
+          return handler.onResponseError(null, err)
         }
 
         let dispatchOpts = null
@@ -358,7 +362,7 @@ module.exports = interceptorOpts => {
           servername: origin.hostname, // For SNI on TLS
           origin: newOrigin,
           headers: {
-            host: origin.hostname,
+            host: origin.host,
             ...origDispatchOpts.headers
           }
         }
