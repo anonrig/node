@@ -452,11 +452,16 @@ void SetFastMethod(Local<v8::Context> context,
                    const std::string_view name,
                    v8::FunctionCallback slow_callback,
                    const v8::CFunction* c_function) {
+  Environment* env = Environment::GetCurrent(context);
+  CHECK_NOT_NULL(env);
   Isolate* isolate = context->GetIsolate();
+  auto data = v8::External::New(isolate, env);
   Local<v8::Function> function =
-      NewFunctionTemplate(isolate,
+      FunctionTemplate::New(isolate,
                           slow_callback,
+                          data,
                           Local<v8::Signature>(),
+                          0,
                           v8::ConstructorBehavior::kThrow,
                           v8::SideEffectType::kHasSideEffect,
                           c_function)
@@ -474,11 +479,16 @@ void SetFastMethodNoSideEffect(Local<v8::Context> context,
                                const std::string_view name,
                                v8::FunctionCallback slow_callback,
                                const v8::CFunction* c_function) {
+  Environment* env = Environment::GetCurrent(context);
+  CHECK_NOT_NULL(env);
   Isolate* isolate = context->GetIsolate();
+  auto data = v8::External::New(isolate, env);
   Local<v8::Function> function =
-      NewFunctionTemplate(isolate,
+      FunctionTemplate::New(isolate,
                           slow_callback,
+                          data,
                           Local<v8::Signature>(),
+                          0,
                           v8::ConstructorBehavior::kThrow,
                           v8::SideEffectType::kHasNoSideEffect,
                           c_function)

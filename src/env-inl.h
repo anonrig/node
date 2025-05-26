@@ -174,6 +174,13 @@ inline bool TickInfo::has_rejection_to_warn() const {
   return fields_[kHasRejectionToWarn] == 1;
 }
 
+inline Environment* Environment::GetCurrent(v8::Local<v8::Value> value) {
+  if (!value->IsExternal()) {
+    return nullptr;
+  }
+  return static_cast<Environment*>(value.As<v8::External>()->Value());
+}
+
 inline Environment* Environment::GetCurrent(v8::Isolate* isolate) {
   if (!isolate->InContext()) [[unlikely]]
     return nullptr;
@@ -192,12 +199,20 @@ inline Environment* Environment::GetCurrent(v8::Local<v8::Context> context) {
 
 inline Environment* Environment::GetCurrent(
     const v8::FunctionCallbackInfo<v8::Value>& info) {
+  // Check if function data is a valid environment pointer
+  if (auto external = GetCurrent(info.Data())) {
+    return external;
+  }
   return GetCurrent(info.GetIsolate()->GetCurrentContext());
 }
 
 template <typename T>
 inline Environment* Environment::GetCurrent(
     const v8::PropertyCallbackInfo<T>& info) {
+  // Check if function data is a valid environment pointer
+  if (auto external = GetCurrent(info.Data())) {
+    return external;
+  }
   return GetCurrent(info.GetIsolate()->GetCurrentContext());
 }
 
