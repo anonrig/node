@@ -10,6 +10,7 @@ const {
   UV_ENOENT,
   UV_EEXIST
 } = internalBinding('uv');
+const { pathToFileURL } = require('url');
 const src = fixtures.path('a.js');
 const dest = tmpdir.resolve('copyfile.out');
 const {
@@ -54,6 +55,17 @@ verify(src, dest);
 // Verify that files are overwritten with default flags.
 fs.copyFileSync(src, dest, 0);
 verify(src, dest);
+
+// Verify Buffer and file: URL paths.
+{
+  const destBuf = tmpdir.resolve('copyfile.buffer');
+  fs.copyFileSync(Buffer.from(src), Buffer.from(destBuf));
+  verify(src, destBuf);
+
+  const destUrl = tmpdir.resolve('copyfile.url');
+  fs.copyFileSync(pathToFileURL(src), pathToFileURL(destUrl));
+  verify(src, destUrl);
+}
 
 // Verify that UV_FS_COPYFILE_FICLONE can be used.
 fs.unlinkSync(dest);
@@ -140,6 +152,13 @@ assert.throws(() => {
       message: /dest/
     }
   );
+});
+
+assert.throws(() => {
+  fs.copyFileSync(new URL('http://example.com/a'), dest);
+}, {
+  code: 'ERR_INVALID_URL_SCHEME',
+  name: 'TypeError',
 });
 
 assert.throws(() => {
