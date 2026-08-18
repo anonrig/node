@@ -2492,6 +2492,13 @@ static MaybeLocal<Value> GetValidatedPath(Environment* env,
       return MaybeLocal<Value>();
     }
 
+    // Match lib/internal/url.js fileURLToPath(): non-file schemes throw
+    // ERR_INVALID_URL_SCHEME with the same message as JS (`file`, not `file:`).
+    if (parsed->type != ada::scheme::FILE) {
+      THROW_ERR_INVALID_URL_SCHEME(isolate, "The URL must be of scheme file");
+      return MaybeLocal<Value>();
+    }
+
     std::optional<std::string> file_path = url::FileURLToPath(env, *parsed);
     if (!file_path.has_value()) {
       return MaybeLocal<Value>();
