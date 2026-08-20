@@ -1563,6 +1563,14 @@ changes:
 
 Enable experimental WebAssembly System Interface (WASI) support.
 
+### `--experimental-web-worker`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+Enable experimental support for the Web Worker API.
+
 ### `--experimental-worker-inspection`
 
 <!-- YAML
@@ -3880,6 +3888,7 @@ one is included in the list below.
 * `--experimental-package-map`
 * `--experimental-print-required-tla`
 * `--experimental-quic`
+* `--experimental-repl-await`
 * `--experimental-require-module`
 * `--experimental-shadow-realm`
 * `--experimental-specifier-resolution`
@@ -3889,6 +3898,7 @@ one is included in the list below.
 * `--experimental-vfs`
 * `--experimental-vm-modules`
 * `--experimental-wasi-unstable-preview1`
+* `--experimental-web-worker`
 * `--force-context-aware`
 * `--force-fips`
 * `--force-node-api-uncaught-exceptions-policy`
