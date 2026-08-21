@@ -1191,6 +1191,8 @@ changes:
    description: No longer experimental.
 -->
 
+* Returns: {Promise}
+
 Calls `filehandle.close()` and returns a promise that fulfills when the
 filehandle is closed.
 
@@ -1331,6 +1333,10 @@ changes:
 
 Asynchronously copies `src` to `dest`. By default, `dest` is overwritten if it
 already exists.
+
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
 
 No guarantees are made about the atomicity of the copy operation. If an
 error occurs after the destination file has been opened for writing, an attempt
@@ -1478,6 +1484,7 @@ const { glob } = require('node:fs/promises');
 ### `fsPromises.lchmod(path, mode)`
 
 <!-- YAML
+added: v10.0.0
 deprecated: v10.0.0
 -->
 
@@ -2849,6 +2856,10 @@ callback function. Node.js makes no guarantees about the atomicity of the copy
 operation. If an error occurs after the destination file has been opened for
 writing, Node.js will attempt to remove the destination.
 
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
+
 `mode` is an optional integer that specifies the behavior
 of the copy operation. It is possible to create a mask consisting of the bitwise
 OR of two or more values (e.g.
@@ -3666,7 +3677,8 @@ glob('**/*.js', (err, matches) => {
 ### `fs.lchmod(path, mode, callback)`
 
 <!-- YAML
-deprecated: v0.4.7
+added: v0.5.0
+deprecated: v0.5.0
 changes:
   - version: v18.0.0
     pr-url: https://github.com/nodejs/node/pull/41678
@@ -6017,6 +6029,10 @@ already exists. Returns `undefined`. Node.js makes no guarantees about the
 atomicity of the copy operation. If an error occurs after the destination file
 has been opened for writing, Node.js will attempt to remove the destination.
 
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
+
 `mode` is an optional integer that specifies the behavior
 of the copy operation. It is possible to create a mask consisting of the bitwise
 OR of two or more values (e.g.
@@ -6288,7 +6304,8 @@ console.log(globSync('**/*.js'));
 ### `fs.lchmodSync(path, mode)`
 
 <!-- YAML
-deprecated: v0.4.7
+added: v0.5.0
+deprecated: v0.5.0
 -->
 
 > Stability: 0 - Deprecated
@@ -7347,6 +7364,8 @@ changes:
    pr-url: https://github.com/nodejs/node/pull/58467
    description: No longer experimental.
 -->
+
+* Returns: {Promise}
 
 Calls `dir.close()` if the directory handle is open, and returns a promise that
 fulfills when disposal is complete.
@@ -8413,6 +8432,7 @@ of bytes written is passed as the first argument to the event handler.
     * `writeBufferLen` {number}
     * `remainingBufferLen`: {number}
   * `sync`: {boolean} Perform writes synchronously.
+* Returns: {fs.Utf8Stream}
 
 #### `utf8Stream.append`
 

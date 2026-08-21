@@ -8,6 +8,7 @@ import { ConstantsBinding } from './internalBinding/constants';
 import { CredentialsBinding } from './internalBinding/credentials';
 import { CryptoBinding } from './internalBinding/crypto';
 import { DebugBinding } from './internalBinding/debug';
+import { DiagnosticsChannelBinding } from './internalBinding/diagnostics_channel';
 import { EncodingBinding } from './internalBinding/encoding_binding';
 import { FsBinding } from './internalBinding/fs';
 import { FsDirBinding } from './internalBinding/fs_dir';
@@ -26,6 +27,7 @@ import { ProcessBinding } from './internalBinding/process';
 import { ProcessWrapBinding } from './internalBinding/process_wrap';
 import { SeaBinding } from './internalBinding/sea';
 import { SerdesBinding } from './internalBinding/serdes';
+import { SignalWrapBinding } from './internalBinding/signal_wrap';
 import { StringDecoderBinding } from './internalBinding/string_decoder';
 import { SymbolsBinding } from './internalBinding/symbols';
 import { TimersBinding } from './internalBinding/timers';
@@ -35,6 +37,7 @@ import { URLPatternBinding } from "./internalBinding/url_pattern";
 import { UtilBinding } from './internalBinding/util';
 import { UVBinding } from './internalBinding/uv';
 import { WASIBinding } from './internalBinding/wasi';
+import { WatchdogBinding } from './internalBinding/watchdog';
 import { WorkerBinding } from './internalBinding/worker';
 import { ZlibBinding } from './internalBinding/zlib';
 
@@ -49,6 +52,7 @@ interface InternalBindingMap {
   credentials: CredentialsBinding;
   crypto: CryptoBinding;
   debug: DebugBinding;
+  diagnostics_channel: DiagnosticsChannelBinding;
   encoding_binding: EncodingBinding;
   fs: FsBinding;
   fs_dir: FsDirBinding;
@@ -67,6 +71,7 @@ interface InternalBindingMap {
   process_wrap: ProcessWrapBinding;
   sea: SeaBinding;
   serdes: SerdesBinding;
+  signal_wrap: SignalWrapBinding;
   string_decoder: StringDecoderBinding;
   symbols: SymbolsBinding;
   timers: TimersBinding;
@@ -76,6 +81,7 @@ interface InternalBindingMap {
   util: UtilBinding;
   uv: UVBinding;
   wasi: WASIBinding;
+  watchdog: WatchdogBinding;
   worker: WorkerBinding;
   zlib: ZlibBinding;
 }
