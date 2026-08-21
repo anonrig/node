@@ -109,15 +109,19 @@ clearCache(fixture, {
   resolver: 'require',
 });
 
-// URL object specifier with resolver: 'require' is a no-op.
-// CJS does not interpret file: URLs as paths; hooks would be needed to handle them.
+// URL object specifier with resolver: 'require' is invalid.
+// require() does not accept URL objects.
 const third = require(fixture);
 assert.strictEqual(third.count, 4);
-clearCache(pathToFileURL(fixture), {
-  parentURL: pathToFileURL(__filename),
-  resolver: 'require',
+assert.throws(() => {
+  clearCache(pathToFileURL(fixture), {
+    parentURL: pathToFileURL(__filename),
+    resolver: 'require',
+  });
+}, {
+  code: 'ERR_INVALID_ARG_TYPE',
 });
-// Cache should still be populated — URL specifiers are not resolved for CJS.
+// Cache should still be populated.
 assert.notStrictEqual(require.cache[fixture], undefined);
 
 // String file: URL specifier with resolver: 'require' is also a no-op.

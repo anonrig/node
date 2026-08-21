@@ -1,42 +1,28 @@
-// Flags: --expose-internals
 'use strict';
 
-require('../common');
+const common = require('../common');
 
-const assert = require('node:assert');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { clearCache } = require('node:module');
-const { internalBinding } = require('internal/test/binding');
+const Module = require('node:module');
+const { checkIfCollectableByCounting } = require('../common/gc');
 
-const {
-  privateSymbols: {
-    module_first_parent_private_symbol,
-    module_last_parent_private_symbol,
-  },
-} = internalBinding('util');
+// require(esm) creates a CJS cache entry that wraps the ES module. After
+// clearCache, that wrapper (and the loaded module) must be collectible.
+const fixture = path.join(__dirname, '..', 'fixtures', 'module-cache', 'esm-counter.mjs');
 
-const parentPath = path.join(__dirname, '..', 'fixtures', 'module-cache', 'cjs-parent.js');
-const childPath = path.join(__dirname, '..', 'fixtures', 'module-cache', 'cjs-child.js');
+const outer = 8;
+const inner = 4;
 
-require(parentPath);
-
-const childModule = require.cache[childPath];
-const parentModule = require.cache[parentPath];
-
-assert.strictEqual(childModule[module_first_parent_private_symbol], parentModule);
-assert.strictEqual(childModule[module_last_parent_private_symbol], parentModule);
-
-clearCache(parentPath, {
-  parentURL: pathToFileURL(__filename),
-  resolver: 'require',
-});
-
-assert.strictEqual(childModule[module_first_parent_private_symbol], undefined);
-assert.strictEqual(childModule[module_last_parent_private_symbol], undefined);
-
-clearCache(childPath, {
-  parentURL: pathToFileURL(__filename),
-  resolver: 'require',
-});
-delete globalThis.__module_cache_cjs_child_counter;
+checkIfCollectableByCounting(() => {
+  for (let i = 0; i < inner; i++) {
+    require(fixture);
+    clearCache(fixture, {
+      parentURL: pathToFileURL(__filename),
+      resolver: 'require',
+    });
+  }
+  delete globalThis.__module_cache_esm_counter;
+  return inner;
+}, Module, outer).then(common.mustCall());

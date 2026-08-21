@@ -75,50 +75,62 @@ added: REPLACEME
 > Stability: 1.0 - Early development
 
 * `specifier` {string|URL} The module specifier, as it would have been passed to
-  `import()` or `require()`.
-* `options` {Object}
-  * `parentURL` {string|URL} The parent URL used to resolve the specifier. Parent identity
-    is part of the resolution cache key. For CommonJS, pass `pathToFileURL(__filename)`.
-    For ES modules, pass `import.meta.url`.
-  * `resolver` {string} Specifies how resolution should be performed. Must be either
-    `'import'` or `'require'`.
+  `import()` or `require()`. When `resolver` is `'require'`, this must be a
+  string (the same kind of path or identifier `require()` accepts). Passing a
+  `URL` object with `resolver: 'require'` throws `ERR_INVALID_ARG_TYPE`.
+* `options` {Object} Required.
+  * `parentURL` {string|URL} Required. The parent URL used to resolve the
+    specifier. Parent identity is part of the resolution cache key. For
+    CommonJS, pass `pathToFileURL(__filename)`. For ES modules, pass
+    `import.meta.url`.
+  * `resolver` {string} Required. How resolution should be performed. Must be
+    either `'import'` or `'require'`.
   * `importAttributes` {Object} Optional import attributes. Only meaningful when
     `resolver` is `'import'`.
 
 Clears the module resolution and module caches for a module. This enables
-reload patterns similar to deleting from `require.cache` in CommonJS, and is useful for
-hot module reload.
+reload patterns similar to deleting from `require.cache` in CommonJS, and is
+useful for hot module reload.
 
-The specifier is resolved using the chosen `resolver`, then the resolved module is removed
-from all internal caches (CommonJS `require` cache, CommonJS resolution caches, ESM resolve
-cache, ESM load cache, and ESM translators cache). When `resolver` is `'import'`,
-`importAttributes` are part of the ESM resolve-cache key, so only the exact
-`(specifier, parentURL, importAttributes)` resolution entry is removed. When a `file:` URL is
-resolved, cached module jobs for the same file path are cleared even if they differ by search
-or hash. This means clearing `'./mod.mjs?v=1'` will also clear `'./mod.mjs?v=2'` and any
+Both `options.parentURL` and `options.resolver` are required. There is no
+recursive option: `clearCache` invalidates only the resolved module, not its
+dependencies. Callers that need to reload a graph must track and clear each
+module themselves.
+
+The specifier is resolved using the chosen `resolver`, then the resolved module
+is removed from all Node.js internal caches (CommonJS `require` cache, CommonJS
+resolution caches, ESM resolve cache, ESM load cache, and ESM translators
+cache). When `resolver` is `'import'`, `importAttributes` are part of the ESM
+resolve-cache key, so only the exact `(specifier, parentURL, importAttributes)`
+resolution entry is removed. When a `file:` URL is resolved, cached module jobs
+for the same file path are cleared even if they differ by search or hash. This
+means clearing `'./mod.mjs?v=1'` will also clear `'./mod.mjs?v=2'` and any
 other query/hash variants that resolve to the same file.
 
-When `resolver` is `'require'`, cached `package.json` data for the resolved module's package
-is also cleared so that updated exports/imports conditions are picked up on the next
-resolution.
+When `resolver` is `'require'`, cached `package.json` data for the resolved
+module's package is also cleared so that updated exports/imports conditions are
+picked up on the next resolution.
 
 Clearing a module does not clear cached entries for its dependencies. When using
-`resolver: 'import'`, resolution cache entries for other specifiers that resolve to the
-same target are not cleared — only the exact `(specifier, parentURL, importAttributes)`
-entry is removed. The module cache itself is cleared by resolved file path, so all
-specifiers pointing to the same file will see a fresh execution on next import.
+`resolver: 'import'`, resolution cache entries for other specifiers that resolve
+to the same target are not cleared — only the exact
+`(specifier, parentURL, importAttributes)` entry is removed. The module cache
+itself is cleared by resolved file path, so all specifiers pointing to the same
+file will see a fresh execution on next import.
 
 #### Memory retention and static imports
 
-`clearCache` only removes references from the Node.js **JavaScript-level** caches
-(the ESM load cache, resolve cache, CJS `require.cache`, and related structures).
-It does **not** affect V8-internal module graph references.
+`clearCache` only removes references from the Node.js internal caches (the ESM
+load cache, resolve cache, CJS `require.cache`, and related structures). It does
+**not** affect references created by user modules, for example through a static
+`import`. If one module imports another, `clearCache` will not clean up that
+link. It only clears references from Node.js internal caches to user modules.
 
-When a module M is **statically imported** by a live parent module P
-(i.e., via a top-level `import … from '…'` statement that has already been
-evaluated), V8's module instantiation creates a permanent internal strong
-reference from P's compiled module record to M's module record. Calling
-`clearCache(M)` cannot sever that link. Consequences:
+When a module M is **statically imported** by a live parent module P (via a
+top-level `import … from '…'` statement that has already been evaluated), the
+engine keeps a permanent internal strong reference from P's compiled module
+record to M's module record. Calling `clearCache(M)` cannot sever that link.
+Consequences:
 
 * The old instance of M **stays alive in memory** for as long as P is alive,
   regardless of how many times M is cleared and re-imported.
@@ -130,12 +142,13 @@ reference from P's compiled module record to M's module record. Calling
   cycles.
 
 For **dynamically imported** modules (`await import('./M.mjs')` with no live
-static parent holding the result), the old `ModuleWrap` becomes eligible for
+static parent holding the result), the old module becomes eligible for
 garbage collection once `clearCache` removes it from Node.js caches and all
-JS-land references (e.g., stored namespace objects) are dropped.
+JavaScript references (for example, stored namespace objects) are dropped.
 
 The safest pattern for hot-reload of ES modules is to use cache-busting search
-parameters (so each version is a distinct module URL) and use dynamic imports for modules that need to be reloaded:
+parameters (so each version is a distinct module URL) and use dynamic imports
+for modules that need to be reloaded:
 
 #### ECMA-262 spec considerations
 
@@ -169,11 +182,14 @@ watch(base, async () => {
 
 #### Examples
 
+Relative specifiers are resolved against `parentURL`, not against the process
+working directory:
+
 ```mjs
 import { clearCache } from 'node:module';
 
+// Resolves to the `mod.mjs` sibling of *this* module, then clears it.
 await import('./mod.mjs');
-
 clearCache('./mod.mjs', {
   parentURL: import.meta.url,
   resolver: 'import',
@@ -193,6 +209,56 @@ clearCache('./mod.js', {
 });
 require('./mod.js'); // eslint-disable-line node-core/no-duplicate-requires
 // re-executes the module
+```
+
+Bare specifiers are resolved the same way `import`/`require` would resolve them
+from `parentURL` (including `node_modules` lookup and `package.json` `"exports"`):
+
+```mjs
+import { clearCache } from 'node:module';
+
+await import('some-package');
+clearCache('some-package', {
+  parentURL: import.meta.url,
+  resolver: 'import',
+});
+await import('some-package'); // re-executes the package entry point
+```
+
+An absolute `file:` URL still requires `parentURL` and `resolver`. The URL is
+the cache key; `parentURL` is used if the loader needs to resolve it again
+(for example, through customization hooks):
+
+```mjs
+import { clearCache } from 'node:module';
+
+const url = new URL('./mod.mjs', import.meta.url);
+await import(url);
+clearCache(url, {
+  parentURL: import.meta.url,
+  resolver: 'import',
+});
+await import(url); // re-executes the module
+```
+
+Reloading a CommonJS module between tests (the ESM equivalent should use
+cache-busting search parameters; see [ECMA-262 spec considerations][]):
+
+```cjs
+const { clearCache } = require('node:module');
+const { pathToFileURL } = require('node:url');
+
+function loadFresh() {
+  clearCache('./app.js', {
+    parentURL: pathToFileURL(__filename),
+    resolver: 'require',
+  });
+  return require('./app.js'); // eslint-disable-line node-core/no-duplicate-requires
+}
+
+const first = loadFresh();
+const second = loadFresh();
+// `first` and `second` are independently evaluated copies.
 ```
 
 ### `module.findPackageJSON(specifier[, base])`
@@ -2173,6 +2239,7 @@ returned object contains the following keys:
 * `columnNumber` {number} The 1-indexed columnNumber of the
   corresponding call site in the original source
 
+[ECMA-262 spec considerations]: #ecma-262-spec-considerations
 [CommonJS]: modules.md
 [Conditional exports]: packages.md#conditional-exports
 [Customization hooks]: #customization-hooks

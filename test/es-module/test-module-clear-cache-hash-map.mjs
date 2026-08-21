@@ -1,23 +1,27 @@
 // Flags: --expose-internals
-// Evaluates the hash_to_module_map memory behaviour across clearCache cycles.
+// Evaluates internal book-keeping memory behaviour across clearCache cycles.
 //
-// hash_to_module_map is a C++ unordered_multimap<int, ModuleWrap*> on the
-// Environment. Every new ModuleWrap adds an entry; the destructor removes it.
-// Clearing the Node-side loadCache does not directly touch hash_to_module_map —
-// entries are removed only when ModuleWrap objects are garbage-collected.
+// Node.js keeps internal book-keeping for compiled ES modules so that a
+// compiled module can be looked up again while it is still alive. Entries are
+// added when a module is compiled and removed when that module is
+// garbage-collected. Clearing the Node-side load cache does not directly
+// touch this book-keeping — entries go away only when the corresponding
+// module objects are collected.
 //
 // We verify two invariants:
 //
-//  1. DYNAMIC imports: after clearCache + GC, the old ModuleWrap is collected
-//     and therefore its hash_to_module_map entry is removed. The map does NOT
-//     grow without bound for purely-dynamic import/clear cycles.
+//  1. DYNAMIC imports: after clearCache + GC, the old compiled module is
+//     collected and therefore its internal book-keeping entry is removed.
+//     Book-keeping does NOT grow without bound for purely-dynamic
+//     import/clear cycles.
 //     (Verified via checkIfCollectableByCounting.)
 //
 //  2. STATIC imports: when a parent P statically imports M, clearing M from
-//     the load cache does not free M's ModuleWrap (the static link keeps it).
-//     Each re-import adds one new entry while the old entry stays for the
-//     lifetime of P. This is a bounded, expected retention (not an unbounded
-//     leak): it is capped at one stale entry per module per live static parent.
+//     the load cache does not free M's compiled module (the static link
+//     keeps it). Each re-import adds one new entry while the old entry stays
+//     for the lifetime of P. This is a bounded, expected retention (not an
+//     unbounded leak): it is capped at one stale entry per module per live
+//     static parent.
 
 import '../common/index.mjs';
 
@@ -40,7 +44,7 @@ const parentURL = new URL(
   import.meta.url,
 ).href;
 
-// ── Invariant 1: dynamic-only cycles do NOT leak ModuleWraps ────────────────
+// ── Invariant 1: dynamic-only cycles do NOT leak compiled modules ───────────
 // Use cache-busting query params so each import gets a distinct URL.
 
 const outer = 8;
@@ -60,8 +64,8 @@ await checkIfCollectableByCounting(async (i) => {
 
 // ── Invariant 2: static-parent cycles cause bounded retention ───────────────
 // After loading the static parent (which pins one counter instance), each
-// clear+re-import of the base counter URL creates exactly one new ModuleWrap
-// while the old one stays alive (pinned by the parent).
+// clear+re-import of the base counter URL creates exactly one new compiled
+// module while the old one stays alive (pinned by the parent).
 // The net growth per cycle is +1. After N cycles the live count is
 //   baseline + 1(parent) + 1(pinned original counter) + 1(current counter)
 // — a constant overhead, not growing with N.
@@ -84,10 +88,10 @@ const v2 = await import(counterBase);
 assert.strictEqual(v2.count, 2);
 
 const wrapCount1 = queryObjects(ModuleWrap, { format: 'count' });
-// +1 new ModuleWrap (v2); old one kept alive by parent's static link.
+// +1 new compiled module (v2); old one kept alive by parent's static link.
 assert.strictEqual(wrapCount1, wrapCount0 + 1,
-                   'Each clear+reimport cycle adds exactly one new ModuleWrap ' +
-                   'when a static parent holds the old instance');
+                   'Each clear+reimport cycle adds exactly one new compiled ' +
+                   'module when a static parent holds the old instance');
 
 // Cycle 2: clear counter again + re-import.
 clearCache(counterBase, {
@@ -98,14 +102,14 @@ const v3 = await import(counterBase);
 assert.strictEqual(v3.count, 3);
 
 const wrapCount2 = queryObjects(ModuleWrap, { format: 'count' });
-// Another +1 (v3); v2 is no longer in loadCache and has no other strong
+// Another +1 (v3); v2 is no longer in the load cache and has no other strong
 // holder, so it MAY have been collected already. v1 (pinned by parent) is
 // still alive. Net growth is bounded by the number of active versions in
 // any live strong reference — typically just the current one plus the
 // parent-pinned original.
 assert.ok(
   wrapCount2 <= wrapCount1 + 1,
-  `After a second cycle, live ModuleWrap count should grow by at most 1 ` +
+  `After a second cycle, live compiled-module count should grow by at most 1 ` +
   `(got ${wrapCount2}, was ${wrapCount1})`,
 );
 

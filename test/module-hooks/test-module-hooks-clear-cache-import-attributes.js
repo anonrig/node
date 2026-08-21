@@ -1,6 +1,6 @@
-// Flags: --expose-internals
-// Tests that the importAttributes option is forwarded correctly
-// to the ESM resolve cache deletion.
+// Tests that clearCache with importAttributes reloads a module imported
+// with matching attributes, and that resolver: 'require' is a no-op that
+// does not throw.
 'use strict';
 
 const common = require('../common');
@@ -8,8 +8,8 @@ const common = require('../common');
 const assert = require('node:assert');
 const { pathToFileURL } = require('node:url');
 const { clearCache, registerHooks } = require('node:module');
-const { getOrInitializeCascadedLoader } = require('internal/modules/esm/loader');
 
+let loadCalls = 0;
 const hook = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === 'virtual-json') {
@@ -23,6 +23,7 @@ const hook = registerHooks({
   },
   load(url, context, nextLoad) {
     if (url === 'virtual://json-data') {
+      loadCalls++;
       return {
         format: 'json',
         source: '{"key": "value"}',
@@ -36,45 +37,25 @@ const hook = registerHooks({
 (async () => {
   const first = await import('virtual-json', { with: { type: 'json' } });
   assert.deepStrictEqual(first.default, { key: 'value' });
+  assert.strictEqual(loadCalls, 1);
 
-  const cascadedLoader = getOrInitializeCascadedLoader();
-  const capturedCalls = [];
-  const original = cascadedLoader.deleteResolveCacheEntry;
-  cascadedLoader.deleteResolveCacheEntry = function(specifier, parentURL, importAttributes) {
-    capturedCalls.push({ specifier, parentURL, importAttributes });
-    return original.call(this, specifier, parentURL, importAttributes);
-  };
+  // Matching importAttributes: the next import must load again.
+  clearCache('virtual-json', {
+    parentURL: pathToFileURL(__filename),
+    resolver: 'import',
+    importAttributes: { type: 'json' },
+  });
 
-  try {
-    // Without importAttributes — default empty object is forwarded.
-    clearCache('virtual-json', {
-      parentURL: pathToFileURL(__filename),
-      resolver: 'import',
-    });
-    assert.strictEqual(capturedCalls.length, 1);
-    assert.strictEqual(capturedCalls[0].specifier, 'virtual-json');
-    assert.deepStrictEqual(Object.keys(capturedCalls[0].importAttributes), []);
+  const second = await import('virtual-json', { with: { type: 'json' } });
+  assert.deepStrictEqual(second.default, { key: 'value' });
+  assert.strictEqual(loadCalls, 2);
 
-    // With importAttributes: { type: 'json' } — forwarded through.
-    clearCache('virtual-json', {
-      parentURL: pathToFileURL(__filename),
-      resolver: 'import',
-      importAttributes: { type: 'json' },
-    });
-    assert.strictEqual(capturedCalls.length, 2);
-    assert.deepStrictEqual(capturedCalls[1].importAttributes, { type: 'json' });
-
-    // resolver: 'require' should NOT call deleteResolveCacheEntry
-    // even though clearCache still clears the CommonJS-side caches.
-    clearCache('virtual-json', {
-      parentURL: pathToFileURL(__filename),
-      resolver: 'require',
-      importAttributes: { type: 'json' },
-    });
-    assert.strictEqual(capturedCalls.length, 2);
-  } finally {
-    cascadedLoader.deleteResolveCacheEntry = original;
-  }
+  // resolver: 'require' should not throw even when importAttributes are set.
+  clearCache('virtual-json', {
+    parentURL: pathToFileURL(__filename),
+    resolver: 'require',
+    importAttributes: { type: 'json' },
+  });
 
   hook.deregister();
 })().then(common.mustCall());
