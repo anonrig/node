@@ -253,7 +253,7 @@ function loadFresh() {
     parentURL: pathToFileURL(__filename),
     resolver: 'require',
   });
-  return require('./app.js'); // eslint-disable-line node-core/no-duplicate-requires
+  return require('./app.js');
 }
 
 const first = loadFresh();
@@ -2239,10 +2239,10 @@ returned object contains the following keys:
 * `columnNumber` {number} The 1-indexed columnNumber of the
   corresponding call site in the original source
 
-[ECMA-262 spec considerations]: #ecma-262-spec-considerations
 [CommonJS]: modules.md
 [Conditional exports]: packages.md#conditional-exports
 [Customization hooks]: #customization-hooks
+[ECMA-262 spec considerations]: #ecma-262-spec-considerations
 [ES Modules]: esm.md
 [Permission Model]: permissions.md#permission-model
 [Source Map]: https://tc39.es/ecma426/
