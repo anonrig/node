@@ -145,7 +145,6 @@ export default [
         TextEncoderStream: 'readonly',
         TransformStream: 'readonly',
         TransformStreamDefaultController: 'readonly',
-        ShadowRealm: 'readonly',
         SubtleCrypto: 'readonly',
         WritableStream: 'readonly',
         WritableStreamDefaultWriter: 'readonly',
