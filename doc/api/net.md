@@ -1906,6 +1906,55 @@ written out, which may not be immediately.
 See `Writable` stream [`write()`][stream_writable_write] method for more
 information.
 
+### `socket.writer([options])`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+> Stability: 1 - Experimental
+
+* `options` {Object}
+  * `autoClose` {boolean} Call [`socket.destroySoon()`][] after the writer
+    ends. **Default:** `false`.
+* Returns: {Object} A [`node:stream/iter`][] Writer.
+  * `write(chunk[, options])` {Function} Returns {Promise}.
+  * `writev(chunks[, options])` {Function} Returns {Promise}. Dispatches the
+    whole batch with a single `handle.writev()` / `uv_write`.
+  * `writeSync(chunk)` {Function} Returns {boolean}.
+  * `writevSync(chunks)` {Function} Returns {boolean}.
+  * `end([options])` {Function} Returns {Promise} that fulfills with the
+    total number of bytes written. Sends FIN after in-flight writes complete.
+  * `endSync()` {Function} Returns {number} or `-1` if a write is in flight.
+  * `fail(reason)` {Function} Destroys the socket.
+
+Return a stream/iter writer that writes directly to the socket handle.
+Unlike [`fromWritable(socket)`][], `writev()` does not cork and call
+[`socket.write()`][] per chunk, so a batch stays one `uv_write`.
+
+This method is only available when the `--experimental-stream-iter` flag
+is enabled. Only one writer may be active on a socket at a time.
+
+```mjs
+import net from 'node:net';
+import { from, pipeTo } from 'node:stream/iter';
+
+const socket = net.connect(8000);
+await pipeTo(from('hello world'), socket.writer());
+```
+
+```cjs
+const net = require('node:net');
+const { from, pipeTo } = require('node:stream/iter');
+
+async function run() {
+  const socket = net.connect(8000);
+  await pipeTo(from('hello world'), socket.writer());
+}
+
+run().catch(console.error);
+```
+
 ### `socket.readyState`
 
 <!-- YAML
@@ -2634,6 +2683,7 @@ console.log('listening on', server.address().port);
 [`ERR_INVALID_ARG_VALUE`]: errors.md#err_invalid_arg_value
 [`ERR_SOCKET_HANDLE_ADOPTED`]: errors.md#err_socket_handle_adopted
 [`EventEmitter`]: events.md#class-eventemitter
+[`fromWritable(socket)`]: stream_iter.md#fromwritablewritable-options
 [`child_process.fork()`]: child_process.md#child_processforkmodulepath-args-options
 [`dns.lookup()`]: dns.md#dnslookuphostname-options-callback
 [`dns.lookup()` hints]: dns.md#supported-getaddrinfo-flags
@@ -2652,6 +2702,7 @@ console.log('listening on', server.address().port);
 [`net.getDefaultAutoSelectFamilyAttemptTimeout()`]: #netgetdefaultautoselectfamilyattempttimeout
 [`netPromises.listen()`]: #netpromiseslistenoptions
 [`new net.Socket(options)`]: #new-netsocketoptions
+[`node:stream/iter`]: stream_iter.md
 [`readable.setEncoding()`]: stream.md#readablesetencodingencoding
 [`server.address()`]: #serveraddress
 [`server.close()`]: #serverclosecallback
@@ -2669,6 +2720,7 @@ console.log('listening on', server.address().port);
 [`socket.connect(port)`]: #socketconnectport-host-connectlistener
 [`socket.connecting`]: #socketconnecting
 [`socket.destroy()`]: #socketdestroyerror
+[`socket.destroySoon()`]: #socketdestroysoon
 [`socket.end()`]: #socketenddata-encoding-callback
 [`socket.localAddress`]: #socketlocaladdress
 [`socket.pause()`]: #socketpause
@@ -2679,6 +2731,7 @@ console.log('listening on', server.address().port);
 [`socket.setKeepAlive(options)`]: #socketsetkeepaliveoptions
 [`socket.setTimeout()`]: #socketsettimeouttimeout-callback
 [`socket.setTimeout(timeout)`]: #socketsettimeouttimeout-callback
+[`socket.write()`]: #socketwritedata-encoding-callback
 [`stream.getDefaultHighWaterMark()`]: stream.md#streamgetdefaulthighwatermarkobjectmode
 [`subprocess.send()`]: child_process.md#subprocesssendmessage-sendhandle-options-callback
 [`worker_threads`]: worker_threads.md
