@@ -65,20 +65,16 @@ async function testWriteAndEnd() {
 async function testWritevKeepsBatch() {
   await withEchoPair(async (socket, getReceived) => {
     const w = socket.writer();
-    const syncOk = w.writevSync([Buffer.from('pre')]);
-    assert.strictEqual(typeof syncOk, 'boolean');
+    assert.strictEqual(w.writevSync([Buffer.from('pre')]), false);
     await w.writev([
       Buffer.from('aaa'),
       Buffer.from('bbb'),
       Buffer.from('ccc'),
     ]);
     const total = await w.end();
-    assert.strictEqual(total, syncOk ? 12 : 9);
+    assert.strictEqual(total, 9);
     await onceEnd(socket);
-    const text = getReceived().text();
-    assert.ok(text.endsWith('aaabbbccc'), text);
-    if (syncOk)
-      assert.ok(text.startsWith('pre'), text);
+    assert.strictEqual(getReceived().text(), 'aaabbbccc');
   });
 }
 

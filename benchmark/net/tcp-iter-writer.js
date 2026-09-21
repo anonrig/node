@@ -28,15 +28,21 @@ function main({ api, chunkSize, chunksPerBatch, dur }) {
     });
   });
 
-  server.listen(common.PORT, () => {
-    const socket = net.connect(common.PORT);
+  server.listen(0, '127.0.0.1', () => {
+    const { port } = server.address();
+    const socket = net.connect({ port, host: '127.0.0.1' });
+    socket.on('error', (err) => { throw err; });
     socket.on('connect', () => {
       bench.start();
       const stopAt = Date.now() + dur * 1000;
 
       function done() {
         const bytes = received;
-        const gbits = (bytes * 8) / (1024 * 1024 * 1024);
+        // Rate is reported in Gbit/s.
+        const gbits = bytes === 0 ? 0 : (bytes * 8) / (1024 * 1024 * 1024);
+        if (bytes === 0) {
+          process.env.NODEJS_BENCHMARK_ZERO_ALLOWED = '1';
+        }
         bench.end(gbits);
         socket.destroy();
         server.close();
@@ -55,23 +61,33 @@ function main({ api, chunkSize, chunksPerBatch, dur }) {
 }
 
 function runClassic(socket, batch, stopAt, done) {
-  socket.on('drain', write);
-  write();
+  let scheduled = false;
 
   function write() {
+    scheduled = false;
     if (Date.now() >= stopAt) {
-      socket.removeListener('drain', write);
       done();
       return;
     }
     socket.cork();
+    let ok = true;
     for (let i = 0; i < batch.length; i++) {
-      socket.write(batch[i]);
+      ok = socket.write(batch[i]);
     }
     socket.uncork();
-    if (Date.now() < stopAt)
+    if (Date.now() >= stopAt) {
+      done();
+      return;
+    }
+    if (ok) {
       setImmediate(write);
+    } else if (!scheduled) {
+      scheduled = true;
+      socket.once('drain', write);
+    }
   }
+
+  write();
 }
 
 function runFromWritable(socket, batch, stopAt, done) {
