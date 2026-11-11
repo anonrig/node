@@ -4767,6 +4767,7 @@ struct CpError {
     kEinval,
     kSymlinkToSubdirectory,
     kEexist,
+    kDirToNonDir,
     kSocket,
     kFifo,
     kUnknown
@@ -4798,6 +4799,8 @@ struct CpError {
         return ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY(isolate, "%s", message);
       case kEexist:
         return ERR_FS_CP_EEXIST(isolate, "%s", message);
+      case kDirToNonDir:
+        return ERR_FS_CP_DIR_TO_NON_DIR(isolate, "%s", message);
       // Sockets, FIFOs and unknown entries are reported to JS by kind and
       // path (see CpDirJob), cpSync skips them; neither builds an error here.
       case kSocket:
@@ -5077,6 +5080,32 @@ CpError CopyDirRecursive(const std::filesystem::path& src_path,
             }
           }
         } else {
+          // create_directory() treats a symlink to a directory as an
+          // existing directory and reports no error. Recursing would write
+          // through that link, outside the destination tree. fs.cp() throws
+          // ERR_FS_CP_DIR_TO_NON_DIR unless dereference is set, which follows
+          // the link the way stat() does.
+          if (!options.dereference) {
+            std::error_code link_error;
+            const auto dest_status = std::filesystem::symlink_status(
+                dest_file_path, link_error);
+            if (link_error &&
+                dest_status.type() !=
+                    std::filesystem::file_type::not_found) {
+              return CpError::Std(link_error,
+                                  ConvertPathToUTF8(dest_file_path));
+            }
+            if (dest_status.type() == std::filesystem::file_type::symlink) {
+              return {CpError::kDirToNonDir,
+                      0,
+                      "cp",
+                      SPrintF("Cannot overwrite non-directory %s "
+                              "with directory %s",
+                              dest_file_path,
+                              entry_dir_path),
+                      {}};
+            }
+          }
           created = std::filesystem::create_directory(dest_file_path, error);
           if (error) {
             return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
