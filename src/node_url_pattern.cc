@@ -77,7 +77,10 @@ std::optional<URLPatternRegexProvider::regex_type>
 URLPatternRegexProvider::create_instance(std::string_view pattern,
                                          bool ignore_case) {
   auto isolate = Isolate::GetCurrent();
-  auto env = Environment::GetCurrent(isolate);
+  // The provider only runs inside URLPattern binding calls, where the current
+  // context is the one the binding was called from. Reading it directly
+  // avoids the embedder-data lookup of Environment::GetCurrent().
+  Local<Context> context = isolate->GetCurrentContext();
   int flags = RegExp::Flags::kUnicodeSets | RegExp::Flags::kDotAll;
   if (ignore_case) {
     flags |= static_cast<int>(RegExp::Flags::kIgnoreCase);
@@ -90,8 +93,7 @@ URLPatternRegexProvider::create_instance(std::string_view pattern,
     return std::nullopt;
   }
   Local<RegExp> regexp;
-  if (!RegExp::New(
-           env->context(), local_pattern, static_cast<RegExp::Flags>(flags))
+  if (!RegExp::New(context, local_pattern, static_cast<RegExp::Flags>(flags))
            .ToLocal(&regexp)) {
     return std::nullopt;
   }
@@ -101,7 +103,7 @@ URLPatternRegexProvider::create_instance(std::string_view pattern,
 bool URLPatternRegexProvider::regex_match(std::string_view input,
                                           const regex_type& pattern) {
   auto isolate = Isolate::GetCurrent();
-  auto env = Environment::GetCurrent(isolate);
+  Local<Context> context = isolate->GetCurrentContext();
   Local<String> local_input;
   if (!String::NewFromUtf8(
            isolate, input.data(), NewStringType::kNormal, input.size())
@@ -110,7 +112,7 @@ bool URLPatternRegexProvider::regex_match(std::string_view input,
   }
   Local<Object> result_object;
   if (!pattern.Get(isolate)
-           ->Exec(env->context(), local_input)
+           ->Exec(context, local_input)
            .ToLocal(&result_object)) {
     return false;
   }
@@ -122,7 +124,7 @@ std::optional<std::vector<std::optional<std::string>>>
 URLPatternRegexProvider::regex_search(std::string_view input,
                                       const regex_type& global_pattern) {
   auto isolate = Isolate::GetCurrent();
-  auto env = Environment::GetCurrent(isolate);
+  Local<Context> context = isolate->GetCurrentContext();
   Local<String> local_input;
   if (!String::NewFromUtf8(
            isolate, input.data(), NewStringType::kNormal, input.size())
@@ -131,8 +133,7 @@ URLPatternRegexProvider::regex_search(std::string_view input,
   }
   Local<Object> exec_result_object;
   auto pattern = global_pattern.Get(isolate);
-  if (!pattern->Exec(env->context(), local_input)
-           .ToLocal(&exec_result_object) ||
+  if (!pattern->Exec(context, local_input).ToLocal(&exec_result_object) ||
       exec_result_object->IsNull()) {
     return std::nullopt;
   }
@@ -143,7 +144,7 @@ URLPatternRegexProvider::regex_search(std::string_view input,
   result.reserve(len);
   for (size_t i = 1; i < len; i++) {
     Local<Value> entry;
-    if (!exec_result->Get(env->context(), i).ToLocal(&entry)) {
+    if (!exec_result->Get(context, i).ToLocal(&entry)) {
       return std::nullopt;
     }
 
@@ -193,8 +194,12 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   }
 
   std::optional<ada::url_pattern_init> init{};
-  std::optional<std::string> input{};
-  std::optional<std::string> base_url{};
+  // The UTF-8 buffers must outlive the call to parse_url_pattern, which
+  // receives string_views into them.
+  std::optional<Utf8Value> input_utf8;
+  std::optional<Utf8Value> base_url_utf8;
+  std::optional<std::string_view> input{};
+  std::optional<std::string_view> base_url{};
   std::optional<ada::url_pattern_options> options{};
 
   // Following patterns are supported:
@@ -207,9 +212,7 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   if (args[0]->IsNullOrUndefined()) {
     init = ada::url_pattern_init{};
   } else if (args[0]->IsString()) {
-    BufferValue input_buffer(env->isolate(), args[0]);
-    CHECK_NOT_NULL(*input_buffer);
-    input = input_buffer.ToString();
+    input = input_utf8.emplace(env->isolate(), args[0]).ToStringView();
   } else if (args[0]->IsObject()) {
     init = URLPatternInit::FromJsObject(env, args[0].As<Object>());
     // If init does not have a value here, the implication is that an
@@ -230,13 +233,11 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
     // USVString ("null"/"undefined"), which will be rejected as invalid
     // URLs by ada downstream.
     if (args[1]->IsString()) {
-      BufferValue base_url_buffer(env->isolate(), args[1]);
-      CHECK_NOT_NULL(*base_url_buffer);
-      base_url = base_url_buffer.ToString();
+      base_url = base_url_utf8.emplace(env->isolate(), args[1]).ToStringView();
     } else if (args[1]->IsNull()) {
-      base_url = std::string("null");
+      base_url = std::string_view("null");
     } else if (args[1]->IsUndefined()) {
-      base_url = std::string("undefined");
+      base_url = std::string_view("undefined");
     } else {
       THROW_ERR_INVALID_ARG_TYPE(env, "second argument must be a string");
       return;
@@ -257,9 +258,7 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
     // Overload resolution: string is overload 1 (baseURL),
     // otherwise overload 2 (options).
     if (args[1]->IsString()) {
-      BufferValue base_url_buffer(env->isolate(), args[1]);
-      CHECK_NOT_NULL(*base_url_buffer);
-      base_url = base_url_buffer.ToString();
+      base_url = base_url_utf8.emplace(env->isolate(), args[1]).ToStringView();
     } else if (args[1]->IsNullOrUndefined()) {
       // Overload 2, options uses default.
     } else if (args[1]->IsObject()) {
@@ -276,19 +275,16 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   // Either url_pattern_init or input as a string must be provided.
   CHECK_IMPLIES(init.has_value(), !input.has_value());
 
-  std::string_view base_url_view{};
-  if (base_url) base_url_view = {base_url->data(), base_url->size()};
-
   ada::url_pattern_input arg0;
   if (init.has_value()) {
     arg0 = std::move(*init);
   } else {
-    arg0 = std::move(*input);
+    arg0 = *input;
   }
 
   auto url_pattern = parse_url_pattern<URLPatternRegexProvider>(
       std::move(arg0),
-      base_url ? &base_url_view : nullptr,
+      base_url ? &*base_url : nullptr,
       options.has_value() ? &options.value() : nullptr);
 
   if (!url_pattern) {
@@ -347,51 +343,31 @@ MaybeLocal<Value> URLPattern::URLPatternInit::ToJsObject(
 std::optional<ada::url_pattern_init> URLPattern::URLPatternInit::FromJsObject(
     Environment* env, Local<Object> obj) {
   ada::url_pattern_init init{};
-  Local<String> components[] = {
-      env->base_url_string(),
-      env->hash_string(),
-      env->hostname_string(),
-      env->password_string(),
-      env->pathname_string(),
-      env->port_string(),
-      env->protocol_string(),
-      env->search_string(),
-      env->username_string(),
+  Isolate* isolate = env->isolate();
+  Local<Context> context = env->context();
+  // WebIDL dictionary members are read in lexicographic order. Each key is
+  // paired with the field it fills, so the order cannot drift between two
+  // parallel arrays.
+  const std::pair<Local<String>, std::optional<std::string>*> members[] = {
+      {env->base_url_string(), &init.base_url},
+      {env->hash_string(), &init.hash},
+      {env->hostname_string(), &init.hostname},
+      {env->password_string(), &init.password},
+      {env->pathname_string(), &init.pathname},
+      {env->port_string(), &init.port},
+      {env->protocol_string(), &init.protocol},
+      {env->search_string(), &init.search},
+      {env->username_string(), &init.username},
   };
-  auto isolate = env->isolate();
-  const auto set_parameter = [&](std::string_view key, std::string_view value) {
-    if (key == "protocol") {
-      init.protocol = std::string(value);
-    } else if (key == "username") {
-      init.username = std::string(value);
-    } else if (key == "password") {
-      init.password = std::string(value);
-    } else if (key == "hostname") {
-      init.hostname = std::string(value);
-    } else if (key == "port") {
-      init.port = std::string(value);
-    } else if (key == "pathname") {
-      init.pathname = std::string(value);
-    } else if (key == "search") {
-      init.search = std::string(value);
-    } else if (key == "hash") {
-      init.hash = std::string(value);
-    } else if (key == "baseURL") {
-      init.base_url = std::string(value);
-    }
-  };
-  Local<Value> value;
-  for (const auto& component : components) {
-    Utf8Value key(isolate, component);
-    if (obj->Get(env->context(), component).ToLocal(&value)) {
-      if (value->IsString()) {
-        Utf8Value utf8_value(isolate, value);
-        set_parameter(key.ToStringView(), utf8_value.ToStringView());
-      }
-    } else {
+  for (const auto& [key, field] : members) {
+    Local<Value> value;
+    if (!obj->Get(context, key).ToLocal(&value)) {
       // If ToLocal failed then we assume an error occurred,
       // bail out early to propagate the error.
       return std::nullopt;
+    }
+    if (value->IsString()) {
+      *field = Utf8Value(isolate, value).ToString();
     }
   }
   return init;
@@ -401,34 +377,31 @@ MaybeLocal<Object> URLPattern::URLPatternComponentResult::ToJSObject(
     Environment* env, const ada::url_pattern_component_result& result) {
   auto isolate = env->isolate();
   auto context = env->context();
-  LocalVector<Name> group_names(isolate);
-  LocalVector<Value> group_values(isolate);
-  group_names.reserve(result.groups.size());
-  group_values.reserve(result.groups.size());
+  // `groups` is a WebIDL record, so it is an ordinary object whose prototype
+  // is %Object.prototype%. Adding the properties one at a time lets V8 reuse
+  // the same map transitions across calls.
+  Local<Object> parsed_group = Object::New(isolate);
   for (const auto& [group_key, group_value] : result.groups) {
     Local<Value> key;
-    if (!ToV8Value(context, group_key).ToLocal(&key)) {
+    if (!ToV8Value(context, group_key, isolate).ToLocal(&key)) {
       return {};
     }
-    group_names.push_back(key.As<Name>());
     Local<Value> value;
     if (group_value) {
-      if (!ToV8Value(env->context(), *group_value).ToLocal(&value)) {
+      if (!ToV8Value(context, *group_value, isolate).ToLocal(&value)) {
         return {};
       }
     } else {
       value = Undefined(isolate);
     }
-    group_values.push_back(value);
+    if (parsed_group->CreateDataProperty(context, key.As<Name>(), value)
+            .IsNothing()) {
+      return {};
+    }
   }
-  auto parsed_group = Object::New(isolate,
-                                  Object::New(isolate),
-                                  group_names.data(),
-                                  group_values.data(),
-                                  group_names.size());
 
   Local<Value> input;
-  if (!ToV8Value(env->context(), result.input).ToLocal(&input)) {
+  if (!ToV8Value(context, result.input, isolate).ToLocal(&input)) {
     return {};
   }
 
@@ -561,21 +534,19 @@ bool URLPattern::Test(Environment* env,
 // V8 Methods
 
 namespace {
-// The arguments of URLPattern.prototype.exec() and test(). When the input is
-// a string, `input` refers to `input_storage`, so instances must not be copied
-// or moved.
+// The arguments of URLPattern.prototype.exec() and test(). When the input or
+// the base URL is a string, `input` and `base_url` refer to the UTF-8 buffers
+// held in `input_storage` and `base_url_storage`, so instances must not be
+// copied or moved.
 struct URLPatternMatchArgs {
   URLPatternMatchArgs() = default;
   URLPatternMatchArgs(const URLPatternMatchArgs&) = delete;
   URLPatternMatchArgs& operator=(const URLPatternMatchArgs&) = delete;
 
-  std::optional<std::string_view> base_url_view() const {
-    return base_url ? std::optional<std::string_view>(*base_url) : std::nullopt;
-  }
-
   ada::url_pattern_input input;
-  std::string input_storage;
-  std::optional<std::string> base_url;
+  std::optional<std::string_view> base_url;
+  std::optional<Utf8Value> input_storage;
+  std::optional<Utf8Value> base_url_storage;
 };
 
 // Parses the `input` and `baseURL` arguments of exec() and test(). Returns
@@ -586,9 +557,8 @@ bool ParseURLPatternMatchArgs(Environment* env,
   if (args.Length() == 0 || args[0]->IsNullOrUndefined()) {
     out->input = ada::url_pattern_init{};
   } else if (args[0]->IsString()) {
-    Utf8Value input_value(env->isolate(), args[0].As<String>());
-    out->input_storage = input_value.ToString();
-    out->input = std::string_view(out->input_storage);
+    out->input =
+        out->input_storage.emplace(env->isolate(), args[0]).ToStringView();
   } else if (args[0]->IsObject()) {
     auto maybeInput =
         URLPattern::URLPatternInit::FromJsObject(env, args[0].As<Object>());
@@ -602,10 +572,10 @@ bool ParseURLPatternMatchArgs(Environment* env,
 
   if (args.Length() > 1 && !args[1]->IsUndefined()) {
     if (args[1]->IsNull()) {
-      out->base_url = std::string("null");
+      out->base_url = std::string_view("null");
     } else if (args[1]->IsString()) {
-      Utf8Value base_url_value(env->isolate(), args[1].As<String>());
-      out->base_url = base_url_value.ToStringView();
+      out->base_url =
+          out->base_url_storage.emplace(env->isolate(), args[1]).ToStringView();
     } else {
       THROW_ERR_INVALID_ARG_TYPE(env, "baseURL must be a string");
       return false;
@@ -623,9 +593,9 @@ void URLPattern::Exec(const FunctionCallbackInfo<Value>& args) {
   URLPatternMatchArgs match_args;
   if (!ParseURLPatternMatchArgs(env, args, &match_args)) return;
 
-  std::optional<std::string_view> base_url = match_args.base_url_view();
   Local<Value> result;
-  if (!url_pattern->Exec(env, match_args.input, base_url).ToLocal(&result)) {
+  if (!url_pattern->Exec(env, match_args.input, match_args.base_url)
+           .ToLocal(&result)) {
     THROW_ERR_OPERATION_FAILED(env, "Failed to exec URLPattern");
     return;
   }
@@ -640,8 +610,8 @@ void URLPattern::Test(const FunctionCallbackInfo<Value>& args) {
   URLPatternMatchArgs match_args;
   if (!ParseURLPatternMatchArgs(env, args, &match_args)) return;
 
-  std::optional<std::string_view> base_url = match_args.base_url_view();
-  args.GetReturnValue().Set(url_pattern->Test(env, match_args.input, base_url));
+  args.GetReturnValue().Set(
+      url_pattern->Test(env, match_args.input, match_args.base_url));
 }
 
 #define URL_PATTERN_COMPONENT_GETTERS(uppercase_name, lowercase_name)          \
