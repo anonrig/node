@@ -4,10 +4,6 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 import * as assert from 'node:assert';
-import { hasFIPS } from '../common/crypto.js';
-
-if (hasFIPS(3))
-  common.skip('SubtleCrypto.supports() does not reflect FIPS provider availability');
 
 const { SubtleCrypto } = globalThis;
 
@@ -71,6 +67,9 @@ function getSharedKeyLength(alg) {
     case 'ml-kem-512':
     case 'ml-kem-768':
     case 'ml-kem-1024':
+    case 'mlkem768-p256':
+    case 'mlkem768-x25519':
+    case 'mlkem1024-p384':
       return 256;
   }
 }

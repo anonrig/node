@@ -18,15 +18,18 @@ using v8::CFunction;
 using v8::Context;
 using v8::DictionaryTemplate;
 using v8::External;
+using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::IndexFilter;
 using v8::Integer;
 using v8::Isolate;
 using v8::KeyCollectionMode;
+using v8::kPromiseHandlerAddedAfterReject;
 using v8::Local;
 using v8::LocalVector;
 using v8::MaybeLocal;
 using v8::Name;
+using v8::Number;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::ONLY_CONFIGURABLE;
@@ -43,15 +46,6 @@ using v8::StackTrace;
 using v8::String;
 using v8::Uint32;
 using v8::Value;
-
-// If a UTF-16 character is a low/trailing surrogate.
-CHAR_TEST(16, IsUnicodeTrail, (ch & 0xFC00) == 0xDC00)
-
-// If a UTF-16 character is a surrogate.
-CHAR_TEST(16, IsUnicodeSurrogate, (ch & 0xF800) == 0xD800)
-
-// If a UTF-16 surrogate is a low/trailing one.
-CHAR_TEST(16, IsUnicodeSurrogateTrail, (ch & 0x400) != 0)
 
 static void GetOwnNonIndexProperties(
     const FunctionCallbackInfo<Value>& args) {
@@ -358,6 +352,7 @@ static void IsInsideNodeModules(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(result);
 }
 
+template <bool return_module>
 static void DefineLazyPropertiesGetter(
     Local<v8::Name> name, const v8::PropertyCallbackInfo<Value>& info) {
   Isolate* isolate = info.GetIsolate();
@@ -366,7 +361,7 @@ static void DefineLazyPropertiesGetter(
   // When this getter is invoked in a vm context, the `Realm::GetCurrent(info)`
   // returns a nullptr and retrieve the creation context via `this` object and
   // get the creation Realm.
-  Local<Value> receiver_val = info.HolderV2();
+  Local<Value> receiver_val = info.Holder();
   if (!receiver_val->IsObject()) {
     THROW_ERR_INVALID_INVOCATION(isolate);
     return;
@@ -387,6 +382,10 @@ static void DefineLazyPropertiesGetter(
     // V8 will have scheduled an error to be thrown.
     return;
   }
+  if constexpr (return_module) {
+    info.GetReturnValue().Set(require_result);
+    return;
+  }
   Local<Value> ret;
   if (!require_result.As<v8::Object>()->Get(context, name).ToLocal(&ret)) {
     // V8 will have scheduled an error to be thrown.
@@ -396,13 +395,15 @@ static void DefineLazyPropertiesGetter(
 }
 
 static void DefineLazyProperties(const FunctionCallbackInfo<Value>& args) {
-  // target: object, id: string, keys: string[][, enumerable = true]
+  // target: object, source: string | object, keys: string[],
+  // enumerable: boolean = true
   CHECK_GE(args.Length(), 3);
   // target: Object where to define the lazy properties.
   CHECK(args[0]->IsObject());
-  // id: Internal module to lazy-load where the API to expose are implemented.
-  CHECK(args[1]->IsString());
-  // keys: Keys to map from `require(id)` and `target`.
+  // source: Internal module ID for named exports, or a map from property names
+  // to module IDs for modules whose entire exports object is the lazy value.
+  CHECK(args[1]->IsString() || args[1]->IsObject());
+  // keys: Property names to expose on `target`.
   CHECK(args[2]->IsArray());
   // enumerable: Whether the property should be enumerable.
   CHECK(args.Length() == 3 || args[3]->IsBoolean());
@@ -410,7 +411,7 @@ static void DefineLazyProperties(const FunctionCallbackInfo<Value>& args) {
   auto context = args.GetIsolate()->GetCurrentContext();
 
   auto target = args[0].As<Object>();
-  Local<Value> id = args[1];
+  Local<Value> source = args[1];
   v8::PropertyAttribute attribute =
       args.Length() == 3 || args[3]->IsTrue() ? v8::None : v8::DontEnum;
 
@@ -423,12 +424,19 @@ static void DefineLazyProperties(const FunctionCallbackInfo<Value>& args) {
       return;
     }
     CHECK(key->IsString());
+    Local<Value> id = source;
+    auto getter = DefineLazyPropertiesGetter<false>;
+    if (source->IsObject()) {
+      if (!source.As<Object>()->Get(context, key).ToLocal(&id)) {
+        // V8 will have scheduled an error to be thrown.
+        return;
+      }
+      CHECK(id->IsString());
+      getter = DefineLazyPropertiesGetter<true>;
+    }
     if (target
-            ->SetLazyDataProperty(context,
-                                  key.As<String>(),
-                                  DefineLazyPropertiesGetter,
-                                  id,
-                                  attribute)
+            ->SetLazyDataProperty(
+                context, key.As<String>(), getter, id, attribute)
             .IsNothing()) {
       // V8 will have scheduled an error to be thrown.
       return;
@@ -467,6 +475,26 @@ void MarkPromiseAsHandled(const FunctionCallbackInfo<Value>& args) {
   Local<Promise> promise = args[0].As<Promise>();
   promise->MarkAsHandled();
   promise->MarkAsSilent();
+
+  // If the promise is already rejected, then it may have already been
+  // reported to the unhandled rejection handler. Marking it as handled
+  // above does not trigger the v8 callback that updates it's status.
+  // So to avoid the notification we call out manually.
+  if (promise->State() == v8::Promise::kRejected) {
+    Environment* env = Environment::GetCurrent(args);
+    Local<Function> callback = env->promise_reject_callback();
+    CHECK(!callback.IsEmpty());
+
+    Local<Value> type =
+        Number::New(env->isolate(), kPromiseHandlerAddedAfterReject);
+    Local<Value> vargs[] = {type, promise, Undefined(env->isolate())};
+
+    USE(callback->Call(
+        env->context(), Undefined(env->isolate()), arraysize(vargs), vargs));
+
+    // Note that if callback->Call throws here, we go ahead and let that
+    // propagate.
+  }
 }
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
@@ -485,7 +513,8 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(ParseEnv);
   registry->Register(IsInsideNodeModules);
   registry->Register(DefineLazyProperties);
-  registry->Register(DefineLazyPropertiesGetter);
+  registry->Register(DefineLazyPropertiesGetter<false>);
+  registry->Register(DefineLazyPropertiesGetter<true>);
   registry->Register(ConstructSharedArrayBuffer);
   registry->Register(MarkPromiseAsHandled);
 }
@@ -496,6 +525,25 @@ void Initialize(Local<Object> target,
                 void* priv) {
   Environment* env = Environment::GetCurrent(context);
   Isolate* isolate = env->isolate();
+
+  {
+    const Local<Object> prototype =
+        SharedArrayBuffer::New(isolate, 0)->GetPrototype().As<Object>();
+    const Local<Object> descriptor =
+        prototype
+            ->GetOwnPropertyDescriptor(
+                context, FIXED_ONE_BYTE_STRING(isolate, "growable"))
+            .ToLocalChecked()
+            .As<Object>();
+    const Local<Value> getter =
+        descriptor->Get(context, env->get_string()).ToLocalChecked();
+    CHECK(getter->IsFunction());
+    target
+        ->Set(context,
+              FIXED_ONE_BYTE_STRING(isolate, "getSharedArrayBufferGrowable"),
+              getter)
+        .Check();
+  }
 
   {
     Local<ObjectTemplate> tmpl = ObjectTemplate::New(isolate);

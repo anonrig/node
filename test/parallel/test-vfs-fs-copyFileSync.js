@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.copyFileSync dispatches to VFS when both paths are within the same mount.
@@ -9,11 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-copyFileSync-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src', { recursive: true });
 myVfs.writeFileSync('/src/hello.txt', 'hello world');
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 fs.copyFileSync(
   path.join(mountPoint, 'src/hello.txt'),

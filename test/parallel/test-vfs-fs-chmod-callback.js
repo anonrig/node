@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.chmod, fs.chown, fs.lchown, fs.utimes, and fs.lutimes callbacks dispatch
@@ -9,11 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-chmod-cb-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src', { recursive: true });
 myVfs.writeFileSync('/src/hello.txt', 'hello');
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 const target = path.join(mountPoint, 'src/hello.txt');
 const uid = process.getuid?.() ?? 0;

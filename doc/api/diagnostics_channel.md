@@ -238,7 +238,7 @@ added:
  - v19.9.0
  - v18.19.0
 changes:
-  - version: REPLACEME
+  - version: v26.8.0
     pr-url: https://github.com/nodejs/node/pull/64525
     description: Marked as stable.
 -->
@@ -749,7 +749,7 @@ added:
  - v19.9.0
  - v18.19.0
 changes:
-  - version: REPLACEME
+  - version: v26.8.0
     pr-url: https://github.com/nodejs/node/pull/64525
     description: Marked as stable.
 -->
@@ -1570,6 +1570,74 @@ passed to `console.warn()`.
 Emitted when `console.error()` is called. Receives and array of the arguments
 passed to `console.error()`.
 
+#### Crypto
+
+<!-- YAML
+added:
+  - v26.9.0
+  - v24.22.0
+-->
+
+> Stability: 1 - Experimental
+
+##### Event: `'crypto.fips.indicator'`
+
+* `operation` {string} The provider-defined operation type.
+* `reason` {string} The provider-defined description of why the operation is
+  not approved.
+* `blocked` {boolean} Whether an indicator callback blocked the operation.
+* `count` {number} The number of matching pending indicator invocations
+  represented by this message.
+* `dropped` {number} The number of additional indicator invocations dropped
+  before this message was delivered.
+
+Emitted when the OpenSSL FIPS provider used by Node.js detects an operation that
+is not FIPS approved after the corresponding provider check was relaxed. Such
+operations are possible when the provider is configured for backwards
+compatibility. The `operation` and `reason` values come from the provider and
+should be treated as opaque strings rather than stable enumerations.
+
+Start Node.js with [`--enable-fips-indicator-events`][] to enable this channel.
+Without the option, subscribing does not install the OpenSSL callback and no
+messages are published.
+
+Subscribing to the channel is observation-only and never changes the result of
+an operation. Node.js preserves the result from any native indicator callback
+installed before Node.js initializes its crypto support. When
+[`--force-fips=strict`][] is used, Node.js rejects callback-indicated
+non-approved operations whether or not indicator events are enabled or the
+channel has subscribers.
+
+Messages are published asynchronously on the main thread because OpenSSL
+indicators can originate from Workers or other threads. Only subscriptions on
+the main thread receive messages. Delivery order relative to the originating
+operation is not defined, and a message cannot be correlated with a particular
+call or Worker.
+
+One cryptographic operation can invoke the OpenSSL indicator more than once.
+Matching pending invocations are coalesced and reflected in `count`, which does
+not necessarily represent a number of cryptographic operations. At most 256
+distinct messages are queued. Additional invocations are reported in `dropped`
+on the first queued message. Queued messages do not keep the event loop active,
+so this channel is best-effort diagnostics rather than an authoritative audit
+log.
+
+This channel observes the default OpenSSL library context used by Node.js. It
+does not observe native addons or other code that uses another `OSSL_LIB_CTX`
+or another copy of `libcrypto`. It is active with OpenSSL 3.4 and later and is
+not available with BoringSSL. A provider configured to reject a check directly,
+including a pedantic OpenSSL FIPS provider, can reject an operation without
+emitting an indicator. Receiving or not receiving a message does not establish
+that Node.js or a cryptographic operation is FIPS validated.
+
+```mjs
+import diagnosticsChannel from 'node:diagnostics_channel';
+
+diagnosticsChannel.subscribe('crypto.fips.indicator', (message) => {
+  console.error('Non-approved cryptographic operation', message);
+});
+```
+
 #### HTTP
 
 > Stability: 1 - Experimental
@@ -1630,6 +1698,25 @@ Emitted when server sends a response.
 #### HTTP/2
 
 > Stability: 1 - Experimental
+
+##### Event: `'http2.client.request.headers'`
+
+* `headers` {HTTP/2 Headers Object | string\[]}
+* `session` {http2.ClientHttp2Session}
+
+Emitted when `ClientHttp2Session#request()` is called, before the request
+headers are validated and serialized. The `headers` object is a copy of the
+one passed to `request()` by the caller (or a newly created object when no
+headers were passed), and it can be mutated in place to add or modify request
+headers before they are sent. Mutating it does not affect the headers
+object passed by the caller. This allows subscribers such as tracing
+instrumentation to inject context headers (e.g. `traceparent`) into outgoing
+HTTP/2 requests.
+Headers injected this way are subject to the same validation as headers
+passed directly to `request()`. To take effect, headers must be mutated in
+place. Unlike `'http2.client.stream.created'`, which is published after
+the request headers have been serialized, mutations made by subscribers to
+this channel affect the headers that are sent.
 
 ##### Event: `'http2.client.stream.created'`
 
@@ -1864,6 +1951,16 @@ Emitted when [`child_process.spawn()`][] encounters an error.
 
 Emitted when [`process.execve()`][] is invoked.
 
+#### Test Runner
+
+<!-- YAML
+added:
+ - v26.1.0
+ - v24.16.0
+-->
+
+See [Test instrumentation and OpenTelemetry][] for details.
+
 #### Web Locks
 
 > Stability: 1 - Experimental
@@ -1924,10 +2021,99 @@ added: v16.18.0
 
 Emitted when a new thread is created.
 
+#### SQLite
+
+<!-- YAML
+added:
+  - v26.8.0
+  - v24.22.0
+-->
+
+> Stability: 1 - Experimental
+
+##### Event: `'sqlite.db.query'`
+
+* `sql` {string} The expanded SQL with bound parameter values substituted.
+  If expansion fails, the source SQL with unsubstituted placeholders is used
+  instead.
+* `database` {Database} The [`Database`][] instance that executed the
+  statement.
+* `duration` {number} SQLite's internal estimate of the statement run time in
+  nanoseconds. This reflects C-layer execution time only and does not include
+  JavaScript binding overhead such as argument marshaling or result-row
+  construction.
+
+Emitted after a SQL statement finishes executing against a [`Database`][]
+instance. This is a **profiling** event: it fires once per statement upon
+completion and reports an estimated duration from SQLite's internal profiler.
+It is not a distributed-tracing span. There is no corresponding start event,
+no async context propagation, and no parent-span linkage. If you need
+OpenTelemetry-compatible spans or async context propagation, wrap your SQLite
+calls with a [`TracingChannel`][] at the JavaScript layer instead.
+
+Publishing is zero-overhead when there are no subscribers.
+
+No event is emitted for a statement that is abandoned mid-iteration and later
+finalized, either explicitly through [`statement.close()`][] or when the
+statement is garbage collected. Subscribers must not close the database or the
+statement, since both are still in use while the event is being delivered; see
+[`database.close()`][] and [`statement.close()`][].
+
+#### libuv Thread Pool
+
+<!-- YAML
+added: REPLACEME
+-->
+
+> Stability: 1 - Experimental
+
+##### Event: `'uv.threadpool.work.<type>'`
+
+Each kind of work submitted to the [libuv thread pool][] has a separate channel
+named by appending its `type` to `'uv.threadpool.work.'`.
+
+Supported values for `<type>` are:
+
+* `'crypto'`
+
+* `'fs.cp'`
+
+* `'fs.readfile'`
+
+* `'fs.writefile'`
+
+* `'glob'`
+
+* `'histogram.qrde'`
+
+* `'node_api'`
+
+* `'readdir_recursive'`
+
+* `'node_sqlite3.BackupJob'`
+
+* `'zlib'`
+
+Messages contain:
+
+* `enqueued` {number} When the work was submitted to the pool.
+
+* `started` {number|null} When execution started, or `null` if cancelled.
+
+* `ended` {number|null} When execution ended, or `null` if cancelled.
+
+Emitted after the work finishes and before its completion callback. Timestamps
+use the [`performance.now()`][] timeline. `started - enqueued` is queue time;
+`ended - started` is execution time.
+
 [BoundedChannel Channels]: #boundedchannel-channels
+[Test instrumentation and OpenTelemetry]: test.md#test-instrumentation-and-opentelemetry
 [TracingChannel Channels]: #tracingchannel-channels
 [`'uncaughtException'`]: process.md#event-uncaughtexception
+[`--enable-fips-indicator-events`]: cli.md#--enable-fips-indicator-events
+[`--force-fips=strict`]: cli.md#--force-fips
 [`BoundedChannel`]: #class-boundedchannel
+[`Database`]: sqlite.md#class-database
 [`TracingChannel`]: #class-tracingchannel
 [`asyncEnd` event]: #asyncendevent
 [`asyncStart` event]: #asyncstartevent
@@ -1938,6 +2124,7 @@ Emitted when a new thread is created.
 [`channel.unsubscribe(onMessage)`]: #channelunsubscribeonmessage
 [`channel.withStoreScope(data)`]: #channelwithstorescopedata
 [`child_process.spawn()`]: child_process.md#child_processspawncommand-args-options
+[`database.close()`]: sqlite.md#databaseclose
 [`diagnostics_channel.channel(name)`]: #diagnostics_channelchannelname
 [`diagnostics_channel.subscribe(name, onMessage)`]: #diagnostics_channelsubscribename-onmessage
 [`diagnostics_channel.tracingChannel()`]: #diagnostics_channeltracingchannelnameorchannels
@@ -1945,8 +2132,11 @@ Emitted when a new thread is created.
 [`error` event]: #errorevent
 [`locks.request()`]: worker_threads.md#locksrequestname-options-callback
 [`net.Server.listen()`]: net.md#serverlisten
+[`performance.now()`]: perf_hooks.md#performancenow
 [`process.execve()`]: process.md#processexecvefile-args-env
 [`start` event]: #startevent
+[`statement.close()`]: sqlite.md#statementclose
 [`worker_threads.locks`]: worker_threads.md#worker_threadslocks
 [context loss]: async_context.md#troubleshooting-context-loss
+[libuv thread pool]: https://docs.libuv.org/en/v1.x/threadpool.html
 [thenable object]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise#thenables

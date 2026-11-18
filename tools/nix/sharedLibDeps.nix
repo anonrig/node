@@ -5,7 +5,8 @@
   withSQLite ? true,
   withSSL ? true,
   withFFI ? true,
-  withTemporal ? false,
+  withPerfetto ? false,
+  withTemporal ? true,
 }:
 {
   inherit (pkgs)
@@ -15,25 +16,29 @@
     libuv
     merve
     nbytes
+    nghttp2
     simdjson
     simdutf
     uvwasi
     zlib
     zstd
     ;
+  abseil = pkgs.abseil-cpp;
   cares = pkgs.c-ares;
   hdr-histogram = pkgs.hdrhistogram_c;
+  highway = pkgs.libhwy;
   http-parser = pkgs.llhttp;
-  nghttp2 = pkgs.nghttp2.overrideAttrs {
-    version = "1.69.0";
-    src = pkgs.fetchurl {
-      url = "https://github.com/nghttp2/nghttp2/releases/download/v1.69.0/nghttp2-1.69.0.tar.bz2";
-      hash = "sha256-PxhfWxw+d4heuc8/LE2ksan3OiS/WVe4KRg60Tf4Lcg=";
-    };
-  };
 }
 // (pkgs.lib.optionalAttrs withLief {
-  inherit (pkgs) lief;
+  # TODO: remove this override once the pin we use has picked up a new LIEF version that includes that patch.
+  lief = pkgs.lief.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [
+      (pkgs.fetchpatch2 {
+        url = "https://github.com/lief-project/LIEF/commit/15777f106f6220046cf26ee99940d1f56751325e.patch?full_index=1";
+        hash = "sha256-Dm7YsBZ4+It+c5PEodsjq7cdOryYOSXt6Lf7h0OH+7M=";
+      })
+    ];
+  });
 })
 // (pkgs.lib.optionalAttrs withQuic {
   inherit (pkgs)
@@ -50,6 +55,9 @@
 // (pkgs.lib.optionalAttrs withSSL ({
   inherit (import ./openssl-matrix.nix { inherit pkgs; }) openssl;
 }))
+// (pkgs.lib.optionalAttrs withPerfetto {
+  perfetto = pkgs.perfetto.sdk;
+})
 // (pkgs.lib.optionalAttrs withTemporal {
   inherit (pkgs) temporal_capi;
 })

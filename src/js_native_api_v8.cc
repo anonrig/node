@@ -1585,7 +1585,7 @@ napi_status NAPI_CDECL node_api_set_prototype(napi_env env,
 
   v8::Local<v8::Value> val = v8impl::V8LocalValueFromJsValue(value);
 
-  v8::Maybe<bool> set_maybe = obj->SetPrototypeV2(context, val);
+  v8::Maybe<bool> set_maybe = obj->SetPrototype(context, val);
 
   RETURN_STATUS_IF_FALSE_WITH_PREAMBLE(
       env, set_maybe.FromMaybe(false), napi_generic_failure);
@@ -1604,7 +1604,7 @@ napi_status NAPI_CDECL napi_get_prototype(napi_env env,
   CHECK_TO_OBJECT(env, context, obj, object);
 
   // This doesn't invokes Proxy's [[GetPrototypeOf]] handler.
-  v8::Local<v8::Value> val = obj->GetPrototypeV2();
+  v8::Local<v8::Value> val = obj->GetPrototype();
   *result = v8impl::JsValueFromV8LocalValue(val);
   return GET_RETURN_STATUS(env);
 }
@@ -1621,8 +1621,8 @@ napi_status NAPI_CDECL napi_create_object(napi_env env, napi_value* result) {
 napi_status NAPI_CDECL
 node_api_create_object_with_properties(napi_env env,
                                        napi_value prototype_or_null,
-                                       napi_value* property_names,
-                                       napi_value* property_values,
+                                       const napi_value* property_names,
+                                       const napi_value* property_values,
                                        size_t property_count,
                                        napi_value* result) {
   CHECK_ENV_NOT_IN_GC(env);

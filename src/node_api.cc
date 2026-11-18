@@ -319,15 +319,22 @@ class ThreadSafeFunction {
     }
   }
 
+  // Runs on JS thread.
   void MaybeDelete() {
+    CHECK_EQ(state, kClosing);
+    // Release the resources like napi_env reference and maybe call into
+    // user code. `state` must be `kClosing` when calling into user code here
+    // to avoid the `delete` below racing with re-entrant finalization.
+    ReleaseResources();
+
     {
       node::Mutex::ScopedLock lock(this->mutex);
+      // Mark the TSFN as ready to be deleted.
+      state = kClosed;
       if (thread_count > 0) {
         // At this point this TSFN is effectively done, but we need to keep
         // it alive for other threads that still have pointers to it until
         // they release them.
-        // But we already release all the resources that we can at this point
-        ReleaseResources();
         return;
       }
     }
@@ -383,9 +390,10 @@ class ThreadSafeFunction {
   inline void* Context() { return context; }
 
  protected:
+  // This calls into user code via `env->Unref()`, which may trigger finalizers,
+  // and calls back into `napi_release_threadsafe_function`.
   void ReleaseResources() {
     if (state != kClosed) {
-      state = kClosed;
       ref.Reset();
       node::RemoveEnvironmentCleanupHook(env->isolate, Cleanup, this);
       env->Unref();
@@ -451,6 +459,7 @@ class ThreadSafeFunction {
 
     if (popped_value) {
       v8::HandleScope scope(env->isolate);
+      v8::Context::Scope context_scope(env->context());
       AsyncResource::CallbackScope cb_scope(&*async_resource);
       napi_value js_callback = nullptr;
       if (!ref.IsEmpty()) {
@@ -469,6 +478,7 @@ class ThreadSafeFunction {
     v8::HandleScope scope(env->isolate);
     EmptyQueue();
     if (finalize_cb) {
+      v8::Context::Scope context_scope(env->context());
       AsyncResource::CallbackScope cb_scope(&*async_resource);
       env->CallFinalizer<false>(finalize_cb, finalize_data, context);
     }
@@ -768,6 +778,8 @@ void napi_module_register_by_symbol(v8::Local<v8::Object> exports,
   // Create a new napi_env for this specific module.
   napi_env env =
       node_napi_env__::New(context, module_filename, module_api_version);
+  // `module_api_version` is not supported.
+  if (env == nullptr) return;
 
   napi_value _exports = nullptr;
   env->CallIntoModule([&](napi_env env) {
@@ -1207,7 +1219,7 @@ class Work : public node::AsyncResource, public node::ThreadPoolWork {
             env->isolate,
             async_resource,
             node::Utf8Value(env->isolate, async_resource_name).ToStringView()),
-        ThreadPoolWork(env->node_env(), "node_api"),
+        ThreadPoolWork(env->node_env(), node::ThreadPoolWorkType::kNodeApi),
         _env(env),
         _data(data),
         _execute(execute),
@@ -1236,6 +1248,7 @@ class Work : public node::AsyncResource, public node::ThreadPoolWork {
     // Establish a handle scope here so that every callback doesn't have to.
     // Also it is needed for the exception-handling below.
     v8::HandleScope scope(_env->isolate);
+    v8::Context::Scope context_scope(_env->context());
 
     CallbackScope callback_scope(this);
 

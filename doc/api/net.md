@@ -99,7 +99,9 @@ Adds a rule to block the given IP address.
 ### `blockList.addAddresses(addresses[, type])`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `addresses` {string\[]|net.SocketAddress\[]} An array of IPv4 or IPv6
@@ -114,7 +116,9 @@ are inserted under a single internal lock acquisition.
 ### `blockList.addCIDR(cidr)`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `cidr` {string} An IPv4 or IPv6 subnet in CIDR notation (e.g.
@@ -128,7 +132,9 @@ the parsed network address, prefix length, and family.
 ### `blockList.addCIDRs(cidrs)`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `cidrs` {string\[]} An array of IPv4 or IPv6 subnets in CIDR notation.
@@ -202,7 +208,9 @@ console.log(blockList.check('::ffff:123.123.123.123', 'ipv6')); // Prints: true
 ### `blockList.clear()`
 
 <!--
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 Clears all rules from the `BlockList`.
@@ -240,12 +248,14 @@ added:
 -->
 
 * `value` {any} Any JS value
-* Returns `true` if the `value` is a `net.BlockList`.
+* Returns {boolean} `true` if the `value` is a `net.BlockList`.
 
 ### `BlockList.PRIVATE_RANGES`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * Type: {string\[]}
@@ -277,7 +287,9 @@ console.log(blockList.check('8.8.8.8'));       // Prints: false
 ### `blockList.removeAddress(address[, type])`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `address` {string|net.SocketAddress} An IPv4 or IPv6 address.
@@ -290,7 +302,9 @@ specified address does not exist, this is a no-op.
 ### `blockList.removeCIDR(cidr)`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `cidr` {string} An IPv4 or IPv6 subnet in CIDR notation (e.g.
@@ -304,7 +318,9 @@ and family. If the specified subnet does not exist, this is a no-op.
 ### `blockList.removeRange(start, end[, type])`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `start` {string|net.SocketAddress} The starting IPv4 or IPv6 address in the
@@ -319,7 +335,9 @@ If the specified range does not exist, this is a no-op.
 ### `blockList.removeSubnet(net, prefix[, type])`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * `net` {string|net.SocketAddress} The network IPv4 or IPv6 address.
@@ -347,7 +365,9 @@ The list of rules added to the blocklist.
 ### `blockList.size`
 
 <!-- YAML
-added: REPLACEME
+added:
+ - v26.8.0
+ - v24.21.0
 -->
 
 * Type: {number}
@@ -605,7 +625,7 @@ server has closed.
 ### `server[Symbol.asyncIterator]()`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -784,6 +804,11 @@ If `handle` is specified, the server adopts that pre-bound socket. Otherwise, if
 Otherwise, if `path` is specified, it behaves the same as
 [`server.listen(path[, backlog][, callback])`][`server.listen(path)`].
 If none of them is specified, an error will be thrown.
+
+> Using the `signal` option to destroy a long-lived server as a resource cleanup
+> mechanism is deprecated. The `signal` option remains appropriate for
+> cancellation, externally propagated aborts, and timeouts. See
+> [DEP0209](deprecations.md#dep0209-using-abortsignal-to-dispose-of-resources).
 
 If `exclusive` is `false` (default), then cluster workers will use the same
 underlying handle, allowing connection handling duties to be shared. When
@@ -981,6 +1006,13 @@ server.listen(8000);
 A listening [`net.Server`][] can be transferred the same way, which moves the
 listening socket itself (and its pending accept queue) to the receiving thread.
 
+An un-adopted TCP [`BoundSocket`][] can also be transferred, which moves the
+bound (but not yet listening or connected) socket. This allows a port to be
+reserved synchronously on one thread and adopted by a server or outgoing
+connection on another. Pipe binds are not transferable. After the transfer, the
+source `BoundSocket` behaves as if it had been adopted: `address()`, `fd()` and
+`close()` throw [`ERR_SOCKET_HANDLE_ADOPTED`][].
+
 ### `new net.Socket([options])`
 
 <!-- YAML
@@ -1111,9 +1143,11 @@ added:
 * `port` {number} The port which the socket attempted to connect to.
 * `family` {number} The family of the IP. It can be `6` for IPv6 or `4` for IPv4.
 
-Emitted when a connection attempt timed out. This is only emitted (and may be
-emitted multiple times) if the family autoselection algorithm is enabled
-in [`socket.connect(options)`][].
+Emitted when a connection attempt is still pending after the configured
+`autoSelectFamilyAttemptTimeout`. If another attempt is about to start, the
+pending attempt remains active and may still establish the connection, unless
+`localPort` requires sequential attempts. This is only emitted if the family
+autoselection algorithm is enabled in [`socket.connect(options)`][].
 
 ### Event: `'data'`
 
@@ -1364,22 +1398,28 @@ For TCP connections, available `options` are:
 
 * `autoSelectFamily` {boolean}: If set to `true`, it enables a family
   autodetection algorithm that loosely implements section 5 of [RFC 8305][]. The
-  `all` option passed to lookup is set to `true` and the sockets attempts to
-  connect to all obtained IPv6 and IPv4 addresses, in sequence, until a
-  connection is established. The first returned AAAA address is tried first,
-  then the first returned A address, then the second returned AAAA address and
-  so on. Each connection attempt (but the last one) is given the amount of time
-  specified by the `autoSelectFamilyAttemptTimeout` option before timing out and
-  trying the next address. Ignored if the `family` option is not `0` or if
-  `localAddress` is set. Connection errors are not emitted if at least one
-  connection succeeds. If all connections attempts fails, a single
-  `AggregateError` with all failed attempts is emitted. **Default:**
-  [`net.getDefaultAutoSelectFamily()`][].
-* `autoSelectFamilyAttemptTimeout` {number}: The amount of time in milliseconds
-  to wait for a connection attempt to finish before trying the next address when
-  using the `autoSelectFamily` option. If set to a positive integer less than
-  `10`, then the value `10` will be used instead. **Default:**
-  [`net.getDefaultAutoSelectFamilyAttemptTimeout()`][].
+  `all` option passed to lookup is set to `true` and the socket attempts to
+  connect to all obtained IPv6 and IPv4 addresses until a connection is
+  established. The first valid address is tried first, followed by addresses
+  from alternating families in their original order. After
+  `autoSelectFamilyAttemptTimeout` milliseconds, or as soon as an attempt fails,
+  the next attempt starts without canceling any pending attempts. The first
+  successful TCP connection wins and the other attempts are canceled. If the
+  last attempt fails while others are still pending, they are given one more
+  `autoSelectFamilyAttemptTimeout` before the connection fails. When `localPort`
+  is set, attempts are made sequentially because multiple connections cannot
+  portably bind the same local port. The option is ignored if `family` is not
+  `0` or if `localAddress` is set. Connection errors are not emitted if at least
+  one connection succeeds. If all connection attempts fail, a single
+  `AggregateError` with all failed attempts, in attempt order, is emitted.
+  **Default:** [`net.getDefaultAutoSelectFamily()`][].
+* `autoSelectFamilyAttemptTimeout` {number}: The delay in milliseconds before
+  starting the next connection attempt while the previous one is pending when
+  using the `autoSelectFamily` option. A failed attempt starts the next one
+  immediately. A pending attempt is not canceled when this delay elapses, except
+  when `localPort` requires sequential attempts. If set to a positive integer
+  less than `10`, then the value `10` will be used instead.
+  **Default:** [`net.getDefaultAutoSelectFamilyAttemptTimeout()`][].
 * `family` {number}: Version of IP stack. Must be `4`, `6`, or `0`. The value
   `0` indicates that both IPv4 and IPv6 addresses are allowed. **Default:** `0`.
 * `hints` {number} Optional [`dns.lookup()` hints][].
@@ -1452,15 +1492,15 @@ added: v0.1.90
 * `error` {Object}
 * Returns: {net.Socket}
 
-Ensures that no more I/O activity happens on this socket.
+Ensures that no more I/O activity happens on the current connection.
 Destroys the stream and closes the connection.
 
 See [`writable.destroy()`][] for further details.
 
 ### `socket.destroyed`
 
-* Type: {boolean} Indicates if the connection is destroyed or not. Once a
-  connection is destroyed no further data can be transferred using it.
+* Type: {boolean} Indicates if the connection is destroyed or not. No further
+  data can be transferred using a destroyed connection.
 
 See [`writable.destroyed`][] for further details.
 
@@ -1664,7 +1704,9 @@ corresponding system default unchanged.
 
 `initialDelay` and `interval` are specified in milliseconds but the
 underlying socket options are configured in whole seconds; the values are
-divided by `1000` and rounded down before being applied.
+divided by `1000` and rounded down before being applied. For example,
+setting `initialDelay` to `400` will result in a `TCP_KEEPIDLE` of `0`
+seconds (since `400 / 1000` rounds down to `0`).
 
 Enabling the keep-alive functionality will set the following socket options:
 
@@ -1916,6 +1958,13 @@ file system entry; abstract and TCP binds have none to remove.
 When a pipe `BoundSocket` bound to a source `path` is adopted as a client, that
 path is reported as the socket's `localAddress` once it connects.
 
+An un-adopted TCP `BoundSocket` can be moved to another thread by listing it in
+the `transferList` of a [`worker_threads`][] `postMessage()` call, see
+[Transferring TCP handles to other threads][]. It can likewise be sent to a
+child process as the `sendHandle` argument of [`subprocess.send()`][]. In both
+cases the source is left in the adopted state. Pipe binds cannot be moved
+either way.
+
 When an adopted `BoundSocket` connects to a numeric IP literal, `connect(2)` is
 issued synchronously, so [`socket.localAddress`][] is resolved once
 [`socket.connect()`][] returns. Connection failures are still reported via a
@@ -1939,7 +1988,9 @@ added:
  - v26.4.0
  - v24.19.0
 changes:
-  - version: v26.7.0
+  - version:
+     - v26.7.0
+     - v24.20.0
     pr-url: https://github.com/nodejs/node/pull/64399
     description: The `path` option is supported.
 -->
@@ -1968,7 +2019,9 @@ added:
  - v26.4.0
  - v24.19.0
 changes:
-  - version: v26.7.0
+  - version:
+     - v26.7.0
+     - v24.20.0
     pr-url: https://github.com/nodejs/node/pull/64399
     description: The bound path is returned for a pipe bind.
 -->
@@ -1983,7 +2036,9 @@ OS-assigned ephemeral port.
 ### `boundSocket.isPipe`
 
 <!-- YAML
-added: v26.7.0
+added:
+ - v26.7.0
+ - v24.20.0
 -->
 
 * {boolean}
@@ -2443,12 +2498,13 @@ added: v0.3.0
 * `input` {string}
 * Returns: {integer}
 
-Returns `6` if `input` is an IPv6 address. Returns `4` if `input` is an IPv4
-address in [dot-decimal notation][] with no leading zeroes. Otherwise, returns
-`0`.
+Returns `6` if `input` is an IPv6 address, including an IPv4-mapped IPv6 address.
+Returns `4` if `input` is an IPv4 address in [dot-decimal notation][] with no
+leading zeroes. Otherwise, returns `0`.
 
 ```js
 net.isIP('::1'); // returns 6
+net.isIP('::ffff:127.0.0.1'); // returns 6
 net.isIP('127.0.0.1'); // returns 4
 net.isIP('127.000.000.001'); // returns 0
 net.isIP('127.0.0.1/24'); // returns 0
@@ -2483,17 +2539,19 @@ added: v0.3.0
 * `input` {string}
 * Returns: {boolean}
 
-Returns `true` if `input` is an IPv6 address. Otherwise, returns `false`.
+Returns `true` if `input` is an IPv6 address, including an IPv4-mapped IPv6 address.
+Otherwise, returns `false`.
 
 ```js
 net.isIPv6('::1'); // returns true
+net.isIPv6('::ffff:127.0.0.1'); // returns true
 net.isIPv6('fhqwhgads'); // returns false
 ```
 
 ## `net/promises` API
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -2509,7 +2567,7 @@ objects rather than relying on events. The API is accessible via
 ### `netPromises.connect(port[, host])`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 * `options` {Object} Accepts the same arguments as [`net.connect()`][]. May
@@ -2538,7 +2596,7 @@ socket.end();
 ### `netPromises.listen([options])`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 * `options` {Object} Accepts the same options as [`net.createServer()`][] and
@@ -2630,6 +2688,7 @@ console.log('listening on', server.address().port);
 [`socket.setTimeout()`]: #socketsettimeouttimeout-callback
 [`socket.setTimeout(timeout)`]: #socketsettimeouttimeout-callback
 [`stream.getDefaultHighWaterMark()`]: stream.md#streamgetdefaulthighwatermarkobjectmode
+[`subprocess.send()`]: child_process.md#subprocesssendmessage-sendhandle-options-callback
 [`worker_threads`]: worker_threads.md
 [`writable.destroy()`]: stream.md#writabledestroyerror
 [`writable.destroyed`]: stream.md#writabledestroyed

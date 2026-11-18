@@ -6,7 +6,7 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-const { hasOpenSSL, hasFIPS } = require('../common/crypto');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
 
 const assert = require('assert');
 const { types: { isCryptoKey } } = require('util');
@@ -158,7 +158,7 @@ const vectors = {
   },
 };
 
-if (!process.features.openssl_is_boringssl) {
+if (!isBoringSSL) {
   vectors.Ed448 = {
     result: 'CryptoKeyPair',
     usages: [
@@ -177,7 +177,7 @@ if (!process.features.openssl_is_boringssl) {
   common.printSkipMessage('Skipping unsupported test cases');
 }
 
-if (hasOpenSSL(3)) {
+if (!isBoringSSL) {
   vectors['AES-OCB'] = {
     algorithm: { length: 256 },
     result: 'CryptoKey',
@@ -200,7 +200,7 @@ if (hasOpenSSL(3)) {
   }
 }
 
-if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
+if (hasOpenSSL(3, 5) || isBoringSSL) {
   for (const name of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
     vectors[name] = {
       result: 'CryptoKeyPair',
@@ -251,18 +251,17 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
 // Test bad usages
 {
   async function test(name) {
-    if (fips3 && name === 'ChaCha20-Poly1305') {
+    if (fips3 && (name === 'ChaCha20-Poly1305' || name === 'AES-OCB')) {
       await assert.rejects(
         subtle.generateKey({ name }, true, []),
-        { name: 'NotSupportedError' });
+        { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
       return;
     }
 
     if (fips35 && (name === 'X25519' || name === 'X448')) {
       await assert.rejects(
         subtle.generateKey({ name }, true, ['deriveBits']),
-        (err) => err.name === 'OperationError' &&
-                 err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED');
+        { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
       return;
     }
 
@@ -504,7 +503,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
 
 
   let fipsExponentTest;
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     if (fips3) {
       fipsExponentTest = assert.rejects(
         subtle.generateKey({
@@ -528,7 +527,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
       );
     }
   } else {
-    common.printSkipMessage('Skipping unsupported SHA-3 test case');
+    common.printSkipMessage('SHA-3 is only supported for digest operations');
   }
 
   const tests = kTests.map((args) => test(...args));
@@ -722,7 +721,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
     [1024, 'SHA-512', ['sign', 'verify']],
   ];
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     kTests.push(
       [256, 'SHA3-256', ['sign', 'verify']],
       [384, 'SHA3-384', ['sign', 'verify']],
@@ -734,7 +733,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
       // [undefined, 'SHA3-512', ['sign', 'verify']],
     );
   } else {
-    common.printSkipMessage('Skipping unsupported SHA-3 test cases');
+    common.printSkipMessage('SHA-3 is only supported for digest operations');
   }
 
   const tests = Promise.all(kTests.map((args) => test(...args)));
@@ -757,8 +756,7 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
   async function testFipsUnsupported(name) {
     await assert.rejects(
       subtle.generateKey({ name }, true, ['deriveKey', 'deriveBits']),
-      (err) => err.name === 'OperationError' &&
-               err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED');
+      { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
   }
 
   async function test(
@@ -808,7 +806,7 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
     ],
   ];
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     kTests.push(
       [
         'Ed448',
@@ -836,7 +834,7 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
 }
 
 // Test ML-DSA Key Generation
-if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
+if (hasOpenSSL(3, 5) || isBoringSSL) {
   async function test(
     name,
     privateUsages,
@@ -879,7 +877,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
 }
 
 // Test ML-KEM Key Generation
-if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
+if (hasOpenSSL(3, 5) || isBoringSSL) {
   async function test(
     name,
     privateUsages,
@@ -916,7 +914,7 @@ if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
 
   const kTests = ['ML-KEM-768', 'ML-KEM-1024'];
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     kTests.unshift('ML-KEM-512');
   } else {
     common.printSkipMessage('Skipping unsupported ML-KEM-512 test');

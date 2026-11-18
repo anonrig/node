@@ -410,12 +410,11 @@ namespace {
 void ExtractInternalFields(Tagged<JSObject> jsobject, void** embedder_fields,
                            int len) {
   int field_count = jsobject->GetEmbedderFieldCount();
-  IsolateForSandbox isolate = GetCurrentIsolateForSandbox();
   for (int i = 0; i < len; ++i) {
     if (field_count == i) break;
     void* pointer;
     if (EmbedderDataSlot(jsobject, i)
-            .DeprecatedToAlignedPointer(isolate, &pointer)) {
+            .DeprecatedToAlignedPointer(Isolate::Current(), &pointer)) {
       embedder_fields[i] = pointer;
     }
   }
@@ -745,6 +744,7 @@ void GlobalHandles::ProcessWeakYoungObjects(
 
 void GlobalHandles::InvokeSecondPassPhantomCallbacks() {
   DCHECK(!AllowJavascriptExecution::IsAllowed(isolate()));
+  DCHECK(!AllowJSObjectModification::IsAllowed(isolate()));
   DCHECK(AllowGarbageCollection::IsAllowed());
 
   if (second_pass_callbacks_.empty()) return;
@@ -755,7 +755,7 @@ void GlobalHandles::InvokeSecondPassPhantomCallbacks() {
   // outermost GC run only.
   GCCallbacksScope scope(isolate()->heap());
   if (scope.CheckReenter()) {
-    TRACE_EVENT0("v8", "V8.GCPhantomHandleProcessingCallback");
+    TRACE_EVENT("v8", "V8.GCPhantomHandleProcessingCallback");
     isolate()->heap()->CallGCPrologueCallbacks(
         GCType::kGCTypeProcessWeakCallbacks, kNoGCCallbackFlags,
         GCTracer::Scope::HEAP_EXTERNAL_PROLOGUE);
@@ -856,6 +856,8 @@ size_t GlobalHandles::InvokeFirstPassWeakCallbacks() {
 
 void GlobalHandles::PendingPhantomCallback::Invoke(Isolate* isolate,
                                                    InvocationType type) {
+  DCHECK(!AllowJavascriptExecution::IsAllowed(isolate));
+  DCHECK(!AllowJSObjectModification::IsAllowed(isolate));
   Data::Callback* callback_addr = nullptr;
   if (type == kFirstPass) {
     callback_addr = &callback_;
@@ -895,6 +897,7 @@ void GlobalHandles::PostGarbageCollectionProcessing(
           DCHECK(second_pass_callbacks_task_posted_);
           second_pass_callbacks_task_posted_ = false;
           DisallowJavascriptExecution no_js(isolate());
+          DisallowJSObjectModification no_js_object_modification(isolate());
           InvokeSecondPassPhantomCallbacks();
         }));
   }

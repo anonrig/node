@@ -5,7 +5,7 @@ const common = require('../common');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { hasOpenSSL3 } = require('../common/crypto');
+const { isBoringSSL } = require('../common/crypto');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 const cliMd = path.join(rootDir, 'doc', 'api', 'cli.md');
@@ -44,7 +44,7 @@ for (const line of [...nodeOptionsLines, ...v8OptionsLines]) {
   }
 }
 
-if (!hasOpenSSL3) {
+if (isBoringSSL) {
   documented.delete('--openssl-legacy-provider');
   documented.delete('--openssl-shared-config');
 }
@@ -63,8 +63,8 @@ const conditionalOpts = [
     filter: (opt) => {
       return [
         '--openssl-config',
-        hasOpenSSL3 ? '--openssl-legacy-provider' : '',
-        hasOpenSSL3 ? '--openssl-shared-config' : '',
+        isBoringSSL ? '' : '--openssl-legacy-provider',
+        isBoringSSL ? '' : '--openssl-shared-config',
         '--tls-cipher-list',
         '--use-bundled-ca',
         '--use-openssl-ca',
@@ -72,6 +72,7 @@ const conditionalOpts = [
         '--secure-heap',
         '--secure-heap-min',
         '--enable-fips',
+        '--enable-fips-indicator-events',
         '--force-fips',
       ].includes(opt);
     }
@@ -136,7 +137,6 @@ assert(undocumented.delete('--experimental-worker'));
 assert(undocumented.delete('--napi-modules'));
 assert(undocumented.delete('--node-snapshot'));
 assert(undocumented.delete('--no-node-snapshot'));
-assert(undocumented.delete('--loader'));
 assert(undocumented.delete('--verify-base-objects'));
 assert(undocumented.delete('--no-verify-base-objects'));
 assert(undocumented.delete('--trace-promises'));

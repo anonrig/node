@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.mkdir, fs.rmdir, fs.rm, and fs.unlink callbacks dispatch through VFS.
@@ -9,14 +9,11 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const baseMountPoint = path.resolve('/tmp/vfs-mkdir-cb-' + process.pid);
-let counter = 0;
 function mounted() {
-  const mountPoint = baseMountPoint + '-' + (counter++);
   const myVfs = vfs.create();
   myVfs.mkdirSync('/src', { recursive: true });
   myVfs.writeFileSync('/src/hello.txt', 'hello');
-  myVfs.mount(mountPoint);
+  const mountPoint = myVfs.mount();
   return { myVfs, mountPoint };
 }
 

@@ -142,7 +142,7 @@ class AllowScriptsCmd extends BaseCommand {
     const has = count === 1 ? 'has' : 'have'
     const pkg = count === 1 ? 'package' : 'packages'
     output.standard(
-      `${count} ${pkg} ${has} install scripts not yet covered by allowScripts:`
+      `${count} ${pkg} ${has} install scripts blocked because they are not covered by allowScripts:`
     )
     for (const { node, scripts } of unreviewed) {
       const { name, version } = trustedDisplay(node)
@@ -221,15 +221,13 @@ class AllowScriptsCmd extends BaseCommand {
     // edge name. A version or range on the arg narrows the match to installed
     // versions that satisfy it. Bundled deps are excluded for the same reason
     // as --all. Args that match nothing are returned in `unmatched`.
+    // Links stay matchable by their edge name (e.g. `foo` -> `file:./local-foo`), but each match is dereferenced to its target and deduplicated, since scripts only run on the target and keying policy off a Link's resolved spec writes store paths under install-strategy=linked (npm/cli#9939).
     const matched = []
     const unmatched = []
     for (const arg of args) {
       const { name: wantName, range } = parsePositional(arg)
-      const found = []
+      const found = new Set()
       for (const node of arb.actualTree.inventory.values()) {
-        if (node.isProjectRoot || node.isWorkspace || node.inBundle) {
-          continue
-        }
         const { name, version } = trustedDisplay(node)
         if (!name || name !== wantName) {
           continue
@@ -237,9 +235,13 @@ class AllowScriptsCmd extends BaseCommand {
         if (range && (!version || !semver.satisfies(version, range, { loose: true }))) {
           continue
         }
-        found.push(node)
+        const target = node.isLink ? node.target : node
+        if (!target || target.isProjectRoot || target.isWorkspace || target.inBundle) {
+          continue
+        }
+        found.add(target)
       }
-      if (found.length === 0) {
+      if (found.size === 0) {
         unmatched.push(arg)
       } else {
         matched.push(...found)

@@ -323,6 +323,10 @@ class KVStore {
   virtual int32_t Query(const char* key) const = 0;
   virtual void Delete(v8::Isolate* isolate, v8::Local<v8::String> key) = 0;
   virtual v8::MaybeLocal<v8::Array> Enumerate(v8::Isolate* isolate) const = 0;
+  // All entries as an array of "KEY=value" strings, in enumeration order —
+  // the form uv_spawn() consumes. The default implementation is
+  // Enumerate() + Get(); stores that can produce it in one pass override it.
+  virtual v8::MaybeLocal<v8::Array> Pairs(v8::Isolate* isolate) const;
 
   virtual std::shared_ptr<KVStore> Clone(v8::Isolate* isolate) const;
   virtual v8::Maybe<void> AssignFromObject(v8::Local<v8::Context> context,
@@ -526,6 +530,85 @@ class MaybeStackBuffer {
   T buf_st_[kStackStorageSize];
 };
 
+template <V8Type T, size_t kStackStorageSize>
+class MaybeStackBuffer<T, kStackStorageSize> {
+ public:
+  using V = v8::Local<T>;
+
+  MaybeStackBuffer(const MaybeStackBuffer&) = delete;
+  MaybeStackBuffer& operator=(const MaybeStackBuffer& other) = delete;
+
+  const V* out() const { return buf_; }
+  V* out() { return buf_; }
+
+  // operator* for compatibility with `v8::String::(Utf8)Value`
+  V* operator*() { return buf_; }
+  const V* operator*() const { return buf_; }
+
+  V& operator[](size_t index) {
+    CHECK_LT(index, length());
+    return buf_[index];
+  }
+
+  const V& operator[](size_t index) const {
+    CHECK_LT(index, length());
+    return buf_[index];
+  }
+
+  size_t length() const { return length_; }
+
+  // Current maximum capacity of the buffer with which SetLength() can be used
+  // without first calling AllocateSufficientStorage().
+  size_t capacity() const { return capacity_; }
+
+  // Make sure enough space for `storage` entries is available.
+  // This method can be called multiple times throughout the lifetime of the
+  // buffer, but once this has been called Invalidate() cannot be used.
+  // Content of the buffer in the range [0, length()) is preserved.
+  void AllocateSufficientStorage(size_t storage);
+
+  void SetLength(size_t length) {
+    // capacity() returns how much memory is actually available.
+    CHECK_LE(length, capacity());
+    length_ = length;
+  }
+
+  // If the buffer is stored in a LocalVector rather than on the stack.
+  bool IsAllocated() const { return !IsInvalidated() && buf_ != buf_st_; }
+
+  // If Invalidate() has been called.
+  bool IsInvalidated() const { return buf_ == nullptr; }
+
+  explicit MaybeStackBuffer(v8::Isolate* isolate)
+      : isolate_(isolate),
+        length_(0),
+        capacity_(arraysize(buf_st_)),
+        buf_(buf_st_) {
+    // Default to a zero-length, null-terminated buffer.
+    buf_[0] = V();
+  }
+
+  MaybeStackBuffer(v8::Isolate* isolate, size_t storage)
+      : MaybeStackBuffer(isolate) {
+    AllocateSufficientStorage(storage);
+  }
+
+  // LocalVector (via optional) handles cleanup automatically.
+  ~MaybeStackBuffer() = default;
+
+  v8::Local<v8::Array> ToArray() const {
+    return v8::Array::New(isolate_, buf_, length_);
+  }
+
+ private:
+  v8::Isolate* isolate_;
+  size_t length_;
+  size_t capacity_;
+  V* buf_;
+  V buf_st_[kStackStorageSize];
+  std::optional<v8::LocalVector<T>> local_vector_;
+};
+
 // Provides access to an ArrayBufferView's storage, either the original,
 // or for small data, a copy of it. This object's lifetime is bound to the
 // original ArrayBufferView's lifetime.
@@ -561,6 +644,18 @@ class ArrayBufferViewContents {
   size_t length_ = 0;
   bool was_detached_ = false;
 };
+
+// Creates a BackingStore with the contents of |data|. |deleter| runs once V8
+// no longer needs |data|: on release of the store when it can reference
+// |data| directly, or before this returns when V8 requires backing stores
+// inside its sandbox and |data| was copied. Returns nullptr if that copy
+// could not be allocated; |deleter| has run in that case too.
+std::unique_ptr<v8::BackingStore> AdoptIntoBackingStore(
+    v8::Isolate* isolate,
+    void* data,
+    size_t byte_length,
+    v8::BackingStore::DeleterCallback deleter,
+    void* deleter_data);
 
 class Utf8Value : public MaybeStackBuffer<char> {
  public:
@@ -782,10 +877,13 @@ constexpr inline bool IsBigEndian() {
 static_assert(IsLittleEndian() || IsBigEndian(),
               "Node.js does not support mixed-endian systems");
 
-class SlicedArguments : public MaybeStackBuffer<v8::Local<v8::Value>> {
+class SlicedArguments : public MaybeStackBuffer<v8::Value> {
  public:
   inline explicit SlicedArguments(
       const v8::FunctionCallbackInfo<v8::Value>& args, size_t start = 0);
+  inline SlicedArguments(v8::Isolate* isolate,
+                         const v8::FunctionCallbackInfo<v8::Value>& args,
+                         size_t start = 0);
 };
 
 // Convert a v8::PersistentBase, e.g. v8::Global, to a Local, with an extra

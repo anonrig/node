@@ -10,14 +10,10 @@
 // throw exceptions during validation.
 
 const common = require('../common');
+const { isBoringSSL } = require('../common/crypto');
 
 if (!common.hasCrypto)
   common.skip('missing crypto');
-
-if (process.features.openssl_is_boringssl) {
-  require('../common/boringssl').testPskTls13Unsupported();
-  return;
-}
 
 const assert = require('assert');
 const { describe, it } = require('node:test');
@@ -26,6 +22,8 @@ const tls = require('tls');
 const fixtures = require('../common/fixtures');
 
 const CIPHERS = 'PSK+HIGH';
+// BoringSSL's PSK callbacks support the certificate-less setup under TLS 1.2.
+const pskOptions = isBoringSSL ? { maxVersion: 'TLSv1.2' } : {};
 const TEST_TIMEOUT = 5000;
 
 // Helper to create a promise that rejects on uncaughtException or timeout
@@ -74,6 +72,7 @@ describe('TLS callback exception handling', () => {
   it('pskCallback returning invalid type emits tlsClientError', async (t) => {
     const server = tls.createServer({
       ciphers: CIPHERS,
+      ...pskOptions,
       pskCallback: () => {
         // Return invalid type (string instead of object/Buffer)
         return 'invalid-should-be-object-or-buffer';
@@ -115,7 +114,10 @@ describe('TLS callback exception handling', () => {
     await promise;
   });
 
-  it('newSession synchronous error emits error', async (t) => {
+  it('newSession synchronous error emits error', {
+    skip: isBoringSSL &&
+      'BoringSSL does not trigger the TLS 1.3 newSession callback in this test',
+  }, async (t) => {
     const server = tls.createServer({
       key: fixtures.readKey('agent2-key.pem'),
       cert: fixtures.readKey('agent2-cert.pem'),
@@ -283,6 +285,7 @@ describe('TLS callback exception handling', () => {
   it('pskCallback throwing emits tlsClientError', async (t) => {
     const server = tls.createServer({
       ciphers: CIPHERS,
+      ...pskOptions,
       pskCallback: () => {
         throw new Error('Intentional callback error');
       },
@@ -410,6 +413,7 @@ describe('TLS callback exception handling', () => {
 
     const server = tls.createServer({
       ciphers: CIPHERS,
+      ...pskOptions,
       pskCallback: () => PSK,
       pskIdentityHint: 'test-hint',
     });
@@ -452,6 +456,7 @@ describe('TLS callback exception handling', () => {
 
     const server = tls.createServer({
       ciphers: CIPHERS,
+      ...pskOptions,
       pskCallback: () => PSK,
       pskIdentityHint: 'test-hint',
     });

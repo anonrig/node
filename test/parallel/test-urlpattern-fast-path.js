@@ -128,3 +128,38 @@ const { URLPattern } = require('url');
   assert.strictEqual(pattern.test('https://example.com', null), false);
   assert.strictEqual(pattern.exec('https://example.com', null), null);
 }
+
+{
+  // Latin-1 (one-byte, non-ASCII) and two-byte string inputs go through the
+  // UTF-8 conversion in the constructor, test() and exec().
+  for (const path of ['/café', '/😀']) {
+    const encoded = new URL(`https://example.com${path}`).pathname;
+    const pattern = new URLPattern(`https://example.com${path}`);
+    assert.strictEqual(pattern.pathname, encoded);
+    assert.strictEqual(pattern.test(`https://example.com${path}`), true);
+    assert.strictEqual(pattern.test(path, 'https://example.com'), true);
+    const result = pattern.exec(`https://example.com${path}`);
+    assert.strictEqual(result.pathname.input, encoded);
+
+    const relative = new URLPattern(path, 'https://example.com');
+    assert.strictEqual(relative.pathname, encoded);
+  }
+  const pattern = new URLPattern({ pathname: '/:name' });
+  assert.strictEqual(
+    pattern.exec('https://example.com/naïve').pathname.groups.name,
+    'na%C3%AFve');
+}
+
+{
+  // `groups` is a WebIDL record: an ordinary object whose prototype is
+  // Object.prototype.
+  const pattern = new URLPattern({ pathname: '/books/:id' });
+  const result = pattern.exec('https://example.com/books/12');
+  for (const component of ['protocol', 'username', 'password', 'hostname',
+                           'port', 'pathname', 'search', 'hash']) {
+    assert.strictEqual(
+      Object.getPrototypeOf(result[component].groups), Object.prototype);
+  }
+  assert.deepStrictEqual({ ...result.pathname.groups }, { id: '12' });
+  assert.deepStrictEqual({ ...result.hostname.groups }, { 0: 'example.com' });
+}

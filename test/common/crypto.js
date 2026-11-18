@@ -123,6 +123,8 @@ const hasOpenSSL = (major = 0, minor = 0, patch = 0) => {
   return OPENSSL_VERSION_NUMBER >= opensslVersionNumber(major, minor, patch);
 };
 
+const isBoringSSL = process.features.openssl_is_boringssl;
+
 const hasFIPS = (major = 0, minor = 0, patch = 0) => {
   return crypto.getFips() === 1 && hasOpenSSL(major, minor, patch);
 };
@@ -144,9 +146,7 @@ module.exports = {
   sec1EncExp,
   hasOpenSSL,
   hasFIPS,
-  get hasOpenSSL3() {
-    return hasOpenSSL(3);
-  },
+  isBoringSSL,
   // opensslCli defined lazily to reduce overhead of spawnSync
   get opensslCli() {
     if (opensslCli !== null) return opensslCli;

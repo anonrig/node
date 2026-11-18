@@ -11,6 +11,7 @@
 #include "src/ast/ast-value-factory.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/base/small-vector.h"
+#include "src/base/strong-alias.h"
 #include "src/base/threaded-list.h"
 #include "src/codegen/background-merge-task.h"
 #include "src/codegen/bailout-reason.h"
@@ -54,9 +55,9 @@ struct ScriptStreamingData;
 namespace maglev {
 class MaglevCompilationJob;
 
-static inline bool IsMaglevEnabled() { return v8_flags.maglev; }
+inline bool IsMaglevEnabled() { return v8_flags.maglev; }
 
-static inline bool IsMaglevOsrEnabled() {
+inline bool IsMaglevOsrEnabled() {
   return IsMaglevEnabled() && v8_flags.maglev_osr;
 }
 
@@ -86,7 +87,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
                       ClearExceptionFlag flag,
                       IsCompiledScope* is_compiled_scope,
                       CreateSourcePositions create_source_positions_flag =
-                          CreateSourcePositions::kNo);
+                          CreateSourcePositions{false});
   static bool Compile(Isolate* isolate, DirectHandle<JSFunction> function,
                       ClearExceptionFlag flag,
                       IsCompiledScope* is_compiled_scope);
@@ -113,11 +114,6 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   V8_WARN_UNUSED_RESULT static MaybeHandle<Code> CompileOptimizedOSR(
       Isolate* isolate, DirectHandle<JSFunction> function,
       BytecodeOffset osr_offset, ConcurrencyMode mode, CodeKind code_kind);
-
-  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<SharedFunctionInfo>
-  CompileForLiveEdit(ParseInfo* parse_info, Handle<Script> script,
-                     MaybeDirectHandle<ScopeInfo> outer_scope_info,
-                     Isolate* isolate);
 
   // Collect source positions for a function that has already been compiled to
   // bytecode, but for which source positions were not collected (e.g. because
@@ -170,7 +166,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
                       ParseRestriction restriction, int parameters_end_pos,
                       int eval_position,
                       ParsingWhileDebugging parsing_while_debugging =
-                          ParsingWhileDebugging::kNo);
+                          ParsingWhileDebugging::kNo,
+                      bool private_name_lookup_skips_outer_class = false);
 
   // Create a function that results from wrapping |source| in a function,
   // with |arguments| being a list of parameters for that function.
@@ -613,6 +610,12 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   void Run(LocalIsolate* isolate,
            ReusableUnoptimizedCompileState* reusable_state);
 
+  template <typename T>
+  IndirectHandle<T> NewPersistentHandle(Tagged<T> obj) {
+    DCHECK_NOT_NULL(persistent_handles_.get());
+    return persistent_handles_->NewHandle(obj);
+  }
+
   MaybeHandle<SharedFunctionInfo> FinalizeScript(
       Isolate* isolate, DirectHandle<String> source,
       const ScriptDetails& script_details,
@@ -620,14 +623,10 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
 
   bool FinalizeFunction(Isolate* isolate, Compiler::ClearExceptionFlag flag);
 
-  void AbortFunction();
-
   UnoptimizedCompileFlags flags() const { return flags_; }
 
  private:
   void ReportStatistics(Isolate* isolate);
-
-  void ClearFunctionJobPointer();
 
   bool is_streaming_compilation() const;
 
@@ -666,7 +665,7 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
 // background parsing and compiling and finalizing it on the main thread.
 struct V8_EXPORT_PRIVATE ScriptStreamingData {
   ScriptStreamingData(
-      std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream,
+      std::unique_ptr<ScriptCompiler::ExternalSourceStreamBase> source_stream,
       ScriptCompiler::StreamedSource::Encoding encoding);
   ScriptStreamingData(const ScriptStreamingData&) = delete;
   ScriptStreamingData& operator=(const ScriptStreamingData&) = delete;
@@ -675,7 +674,7 @@ struct V8_EXPORT_PRIVATE ScriptStreamingData {
   void Release();
 
   // Internal implementation of v8::ScriptCompiler::StreamedSource.
-  std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream;
+  std::unique_ptr<ScriptCompiler::ExternalSourceStreamBase> source_stream;
   ScriptCompiler::StreamedSource::Encoding encoding;
 
   // Task that performs background parsing and compilation.
@@ -721,7 +720,7 @@ class V8_EXPORT_PRIVATE BackgroundDeserializeTask {
  private:
   Isolate* isolate_for_local_isolate_;
   AlignedCachedData cached_data_;
-  CodeSerializer::OffThreadDeserializeData off_thread_data_;
+  OffThreadDeserializeData off_thread_data_;
   BackgroundMergeTask background_merge_task_;
   TimedHistogram* timer_;
   int64_t background_time_in_microseconds_ = 0;

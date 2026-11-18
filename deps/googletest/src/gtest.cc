@@ -1876,11 +1876,13 @@ bool IsSubstringPred(const char* needle, const char* haystack) {
   return strstr(haystack, needle) != nullptr;
 }
 
+#if GTEST_HAS_STD_WSTRING
 bool IsSubstringPred(const wchar_t* needle, const wchar_t* haystack) {
   if (needle == nullptr || haystack == nullptr) return needle == haystack;
 
   return wcsstr(haystack, needle) != nullptr;
 }
+#endif  // GTEST_HAS_STD_WSTRING
 
 // StringType here can be either ::std::string or ::std::wstring.
 template <typename StringType>
@@ -1922,20 +1924,9 @@ AssertionResult IsSubstring(const char* needle_expr, const char* haystack_expr,
   return IsSubstringImpl(true, needle_expr, haystack_expr, needle, haystack);
 }
 
-AssertionResult IsSubstring(const char* needle_expr, const char* haystack_expr,
-                            const wchar_t* needle, const wchar_t* haystack) {
-  return IsSubstringImpl(true, needle_expr, haystack_expr, needle, haystack);
-}
-
 AssertionResult IsNotSubstring(const char* needle_expr,
                                const char* haystack_expr, const char* needle,
                                const char* haystack) {
-  return IsSubstringImpl(false, needle_expr, haystack_expr, needle, haystack);
-}
-
-AssertionResult IsNotSubstring(const char* needle_expr,
-                               const char* haystack_expr, const wchar_t* needle,
-                               const wchar_t* haystack) {
   return IsSubstringImpl(false, needle_expr, haystack_expr, needle, haystack);
 }
 
@@ -1953,6 +1944,17 @@ AssertionResult IsNotSubstring(const char* needle_expr,
 }
 
 #if GTEST_HAS_STD_WSTRING
+AssertionResult IsSubstring(const char* needle_expr, const char* haystack_expr,
+                            const wchar_t* needle, const wchar_t* haystack) {
+  return IsSubstringImpl(true, needle_expr, haystack_expr, needle, haystack);
+}
+
+AssertionResult IsNotSubstring(const char* needle_expr,
+                               const char* haystack_expr, const wchar_t* needle,
+                               const wchar_t* haystack) {
+  return IsSubstringImpl(false, needle_expr, haystack_expr, needle, haystack);
+}
+
 AssertionResult IsSubstring(const char* needle_expr, const char* haystack_expr,
                             const ::std::wstring& needle,
                             const ::std::wstring& haystack) {
@@ -2182,6 +2184,7 @@ bool String::WideCStringEquals(const wchar_t* lhs, const wchar_t* rhs) {
   return wcscmp(lhs, rhs) == 0;
 }
 
+#if GTEST_HAS_STD_WSTRING
 // Helper function for *_STREQ on wide strings.
 AssertionResult CmpHelperSTREQ(const char* lhs_expression,
                                const char* rhs_expression, const wchar_t* lhs,
@@ -2206,6 +2209,7 @@ AssertionResult CmpHelperSTRNE(const char* s1_expression,
          << "Expected: (" << s1_expression << ") != (" << s2_expression
          << "), actual: " << PrintToString(s1) << " vs " << PrintToString(s2);
 }
+#endif  // GTEST_HAS_STD_WSTRING
 
 // Compares two C strings, ignoring case.  Returns true if and only if they have
 // the same content.
@@ -2561,7 +2565,7 @@ void Test::SetUp() {}
 void Test::TearDown() {}
 
 // Allows user supplied key value pairs to be recorded for later output.
-void Test::RecordProperty(const std::string& key, const std::string& value) {
+void Test::RecordProperty(std::string_view key, std::string_view value) {
   UnitTest::GetInstance()->RecordProperty(key, value);
 }
 
@@ -4644,7 +4648,7 @@ std::string JsonUnitTestResultPrinter::EscapeJson(const std::string& str) {
         m << "\\r";
         break;
       default:
-        if (ch < ' ') {
+        if (static_cast<unsigned char>(ch) < ' ' || ch == '\x7F') {
           m << "\\u00" << String::FormatByte(static_cast<unsigned char>(ch));
         } else {
           m << ch;
@@ -5285,17 +5289,8 @@ void TestEventListeners::SuppressEventForwarding(bool suppress) {
 // call this before main() starts, from which point on the return
 // value will never change.
 UnitTest* UnitTest::GetInstance() {
-  // CodeGear C++Builder insists on a public destructor for the
-  // default implementation.  Use this implementation to keep good OO
-  // design with private destructor.
-
-#if defined(__BORLANDC__)
-  static UnitTest* const instance = new UnitTest;
-  return instance;
-#else
   static UnitTest instance;
   return &instance;
-#endif  // defined(__BORLANDC__)
 }
 
 // Gets the number of successful test suites.
@@ -5533,8 +5528,7 @@ void UnitTest::AddTestPartResult(TestPartResult::Type result_type,
 // from SetUpTestSuite or TearDownTestSuite, or to the global property set
 // when invoked elsewhere.  If the result already contains a property with
 // the same key, the value will be updated.
-void UnitTest::RecordProperty(const std::string& key,
-                              const std::string& value) {
+void UnitTest::RecordProperty(std::string_view key, std::string_view value) {
   impl_->RecordProperty(TestProperty(key, value));
 }
 
@@ -6862,6 +6856,16 @@ static void LoadFlagsFromFile(const std::string& path) {
     if (!ParseGoogleTestFlag(lines[i].c_str())) g_help_flag = true;
   }
 }
+
+static bool ParseFlagFileFlag(const char* const arg) {
+  std::string flagfile_value;
+  if (!ParseFlag(arg, "flagfile", &flagfile_value)) {
+    return false;
+  }
+  GTEST_FLAG_SET(flagfile, flagfile_value);
+  LoadFlagsFromFile(flagfile_value);
+  return true;
+}
 #endif  // GTEST_USE_OWN_FLAGFILE_FLAG_ && GTEST_HAS_FILE_SYSTEM
 
 // Parses the command line for Google Test flags, without initializing
@@ -6869,7 +6873,6 @@ static void LoadFlagsFromFile(const std::string& path) {
 // instantiated to either char or wchar_t.
 template <typename CharType>
 void ParseGoogleTestFlagsOnlyImpl(int* argc, CharType** argv) {
-  std::string flagfile_value;
   for (int i = 1; i < *argc; i++) {
     const std::string arg_string = StreamableToString(argv[i]);
     const char* const arg = arg_string.c_str();
@@ -6880,9 +6883,7 @@ void ParseGoogleTestFlagsOnlyImpl(int* argc, CharType** argv) {
     if (ParseGoogleTestFlag(arg)) {
       remove_flag = true;
 #if GTEST_USE_OWN_FLAGFILE_FLAG_ && GTEST_HAS_FILE_SYSTEM
-    } else if (ParseFlag(arg, "flagfile", &flagfile_value)) {
-      GTEST_FLAG_SET(flagfile, flagfile_value);
-      LoadFlagsFromFile(flagfile_value);
+    } else if (ParseFlagFileFlag(arg)) {
       remove_flag = true;
 #endif  // GTEST_USE_OWN_FLAGFILE_FLAG_ && GTEST_HAS_FILE_SYSTEM
     } else if (arg_string == "--help" || HasGoogleTestFlagPrefix(arg)) {

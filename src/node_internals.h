@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -44,6 +45,10 @@
 struct sockaddr;
 
 namespace node {
+
+namespace diagnostics_channel {
+class Channel;
+}
 
 namespace builtins {
 class BuiltinLoader;
@@ -107,7 +112,14 @@ std::string FormatErrorMessage(v8::Isolate* isolate,
                                const std::string& reason,
                                v8::Local<v8::Message> message,
                                bool add_source_line = true);
-void ResetStdio();  // Safe to call more than once and from signal handlers.
+// Restores the stdio file descriptors to their startup state. Safe to call
+// more than once and from signal handlers. The terminal attributes are only
+// restored when Node.js changed the terminal mode itself (see
+// SetTerminalModeChanged()) or when |force_terminal_restore| is true.
+void ResetStdio(bool force_terminal_restore = false);
+// Records that Node.js changed the terminal mode, e.g. through
+// tty.ReadStream.prototype.setRawMode(). Safe to call from any thread.
+void SetTerminalModeChanged();
 #ifdef __POSIX__
 void SignalExit(int signal, siginfo_t* info, void* ucontext);
 #endif
@@ -279,7 +291,14 @@ class InternalCallbackScope {
   bool pushed_ids_ = false;
   bool closed_ = false;
   v8::Global<v8::Value> prior_context_frame_;
+  std::optional<v8::Isolate::AllowJavascriptExecutionScope> allow_js_;
 };
+
+// Non-zero while an Environment on this thread is closing its handles with JS
+// disallowed isolate-wide; InternalCallbackScope re-allows it for the other
+// Environments whose callbacks run in those loop turns.
+// NOLINTNEXTLINE(runtime/thread_local)
+extern thread_local int handle_cleanup_depth;
 
 class DebugSealHandleScope {
  public:
@@ -297,8 +316,10 @@ class DebugSealHandleScope {
 
 class ThreadPoolWork {
  public:
-  explicit inline ThreadPoolWork(Environment* env, const char* type)
-      : env_(env), type_(type) {
+  explicit inline ThreadPoolWork(Environment* env, ThreadPoolWorkType type)
+      : env_(env),
+        type_(kThreadPoolWorkNames[static_cast<size_t>(type)].data()),
+        channel_(env->threadpool_work_channel(type)) {
     CHECK_NOT_NULL(env);
   }
   inline virtual ~ThreadPoolWork() = default;
@@ -312,9 +333,19 @@ class ThreadPoolWork {
   Environment* env() const { return env_; }
 
  private:
+  inline bool IsObserved() const { return enqueued_at_ != 0; }
+
+  inline void PublishDiagnostics(diagnostics_channel::Channel& channel);
+
   Environment* env_;
   uv_work_t work_req_;
   const char* type_;
+  ThreadPoolWorkChannel* channel_ = nullptr;
+
+  // libuv synchronizes these marks between the loop and worker threads.
+  uint64_t enqueued_at_ = 0;
+  uint64_t work_start_ = 0;
+  uint64_t work_end_ = 0;
 };
 
 // Functions defined in node.cc that are exposed via the bootstrapper object
@@ -348,6 +379,8 @@ void DefineZlibConstants(v8::Local<v8::Object> target);
 // addresses, so this should be used with care.
 v8::IsolateGroup GetOrCreateIsolateGroup();
 
+// The blob every isolate is created from, see NewIsolate(). It is never freed.
+bool IsFirstSnapshotBlob(const char* data);
 v8::Isolate* NewIsolate(v8::Isolate::CreateParams* params,
                         uv_loop_t* event_loop,
                         MultiIsolatePlatform* platform,
@@ -380,7 +413,6 @@ class InitializationResultImpl final : public InitializationResult {
   MultiIsolatePlatform* platform_ = nullptr;
 };
 
-void SetIsolateErrorHandlers(v8::Isolate* isolate, const IsolateSettings& s);
 void SetIsolateMiscHandlers(v8::Isolate* isolate, const IsolateSettings& s);
 void SetIsolateCreateParamsForNode(v8::Isolate::CreateParams* params);
 

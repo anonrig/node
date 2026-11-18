@@ -1,10 +1,12 @@
 'use strict';
 
 const common = require('../common');
+
+const { isBoringSSL } = require('../common/crypto');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-if (!process.features.openssl_is_boringssl)
+if (!isBoringSSL)
   common.skip('BoringSSL-only test');
 
 const assert = require('assert');
@@ -28,4 +30,7 @@ const hashes = getHashes();
   'sha1',
   'sha256',
   'sha512-256',
+  'sha3-256',
+  'sha3-384',
+  'sha3-512',
 ].forEach((hash) => assert(hashes.includes(hash), hash));

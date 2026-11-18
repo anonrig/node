@@ -137,12 +137,9 @@ function testRenegotiationUnsupported() {
 }
 
 /**
- * OpenSSL exposes the negotiated ephemeral key type, name, and size for TLS
- * clients. With BoringSSL the same ECDHE TLS 1.2 handshake succeeds, but
- * getEphemeralKeyInfo() returns null on the server side and an object whose
- * fields are undefined on the client side.
+ * BoringSSL exposes the negotiated TLS group but not the ephemeral key size.
  */
-function testEphemeralKeyInfoUnsupported() {
+function testEphemeralKeyInfo() {
   const server = tls.createServer({
     key: fixtures.readKey('agent2-key.pem'),
     cert: fixtures.readKey('agent2-cert.pem'),
@@ -161,37 +158,10 @@ function testEphemeralKeyInfoUnsupported() {
       maxVersion: 'TLSv1.2',
     }, common.mustCall(() => {
       assert.deepStrictEqual(client.getEphemeralKeyInfo(), {
-        type: undefined,
-        name: undefined,
+        type: 'TLSGroup',
+        name: 'prime256v1',
         size: undefined,
       });
-      server.close();
-    }));
-  }));
-}
-
-/**
- * The protocol matrix tests cover OpenSSL behavior for legacy TLS protocols.
- * For BoringSSL we only need to exhibit that a TLSv1-only client cannot connect
- * to a server whose minimum protocol is TLS 1.2; the client receives the
- * protocol-version alert instead of the OpenSSL version-specific matrix.
- */
-function testLegacyProtocolUnsupported() {
-  const server = tls.createServer({
-    key: fixtures.readKey('agent2-key.pem'),
-    cert: fixtures.readKey('agent2-cert.pem'),
-    minVersion: 'TLSv1.2',
-  }, common.mustNotCall());
-
-  server.on('tlsClientError', common.mustCall());
-  server.listen(0, common.mustCall(() => {
-    const client = tls.connect({
-      port: server.address().port,
-      rejectUnauthorized: false,
-      secureProtocol: 'TLSv1_method',
-    }, common.mustNotCall());
-    client.on('error', common.mustCall((err) => {
-      assert.strictEqual(err.code, 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION');
       server.close();
     }));
   }));
@@ -337,8 +307,7 @@ module.exports = {
   assertMultiKeyUnsupported,
   assertNoCipherMatch,
   assertOpenSSLSecurityLevelsUnsupported,
-  testEphemeralKeyInfoUnsupported,
-  testLegacyProtocolUnsupported,
+  testEphemeralKeyInfo,
   testMultiPfxSelectionDifference,
   testPskTls13Unsupported,
   testRenegotiationUnsupported,

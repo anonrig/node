@@ -6,7 +6,7 @@ import path from 'node:path';
 import assert from 'node:assert';
 import process from 'node:process';
 import { describe, it, beforeEach, afterEach } from 'node:test';
-import { writeFileSync, mkdirSync, appendFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, appendFileSync, rmSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { setTimeout } from 'node:timers/promises';
 import { once } from 'node:events';
@@ -17,6 +17,9 @@ if (common.isIBMi)
   common.skip('IBMi does not support `fs.watch()`');
 
 const supportsRecursiveWatching = common.isMacOS || common.isWindows;
+// Elsewhere a directory watch does not report changes to its entries by name,
+// so the files are watched directly.
+const watchesParentDirectory = supportsRecursiveWatching || common.isLinux;
 
 const { FilesWatcher } = watcher;
 tmpdir.refresh();
@@ -34,9 +37,25 @@ describe('watch mode file watcher', () => {
   afterEach(() => watcher.clear());
 
   let counter = 0;
+  // A newly created watcher might not report changes right away (e.g. on
+  // macOS the FSEvents stream is started asynchronously), so a single write
+  // can be missed. Keep writing until a change is reported.
   function writeAndWaitForChanges(watcher, file) {
     return new Promise((resolve) => {
       const interval = setInterval(() => writeFileSync(file, `write ${counter++}`), 100);
+      watcher.once('changed', () => {
+        clearInterval(interval);
+        resolve();
+      });
+    });
+  }
+
+  function replaceAndWaitForChanges(watcher, file) {
+    return new Promise((resolve) => {
+      const interval = setInterval(() => {
+        rmSync(file, { force: true });
+        writeFileSync(file, `replace ${counter++}`);
+      }, 100);
       watcher.once('changed', () => {
         clearInterval(interval);
         resolve();
@@ -52,6 +71,19 @@ describe('watch mode file watcher', () => {
     assert.strictEqual(changesCount, 1);
   });
 
+  it('should keep detecting files replaced via unlink and create', { skip: !watchesParentDirectory }, async () => {
+    // Regression test for https://github.com/nodejs/node/issues/51621: a watch
+    // bound to the file inode stops firing after the first replacement, so the
+    // second `replaceAndWaitForChanges` call would hang on the buggy behavior.
+    const file = tmpdir.resolve('replaced.js');
+    writeFileSync(file, 'written');
+    watcher.filterFile(file);
+    await replaceAndWaitForChanges(watcher, file);
+    await replaceAndWaitForChanges(watcher, file);
+    await replaceAndWaitForChanges(watcher, file);
+    assert.ok(changesCount >= 3, `expected at least 3 changes, got ${changesCount}`);
+  });
+
   it('should watch changed files with same prefix path string', async () => {
     mkdirSync(tmpdir.resolve('subdir'));
     mkdirSync(tmpdir.resolve('sub'));
@@ -64,19 +96,29 @@ describe('watch mode file watcher', () => {
                         ['--watch', file1],
                         { stdio: ['ignore', 'pipe', 'ignore'] });
     let completeCount = 0;
+    let appendInterval;
     for await (const line of createInterface(child.stdout)) {
       if (!line.startsWith('Completed running')) {
         continue;
       }
       completeCount++;
       if (completeCount === 1) {
+        // The watcher of the child might not report changes yet, so keep
+        // changing the file until it is reloaded. The interval is longer than
+        // the default debounce of watch mode so the restart is not deferred.
         appendFileSync(file1, '\n // append 1');
+        appendInterval = setInterval(() => appendFileSync(file1, '\n // append'),
+                                     common.platformTimeout(1000));
       }
       // The file is reloaded due to file watching
       if (completeCount === 2) {
+        clearInterval(appendInterval);
         child.kill();
       }
     }
+    // The child might have exited before the reload.
+    clearInterval(appendInterval);
+    assert.strictEqual(completeCount, 2);
   });
 
   it('should debounce changes', async () => {
@@ -106,6 +148,7 @@ describe('watch mode file watcher', () => {
       watcher.filterFile(file);
       files.push(file);
     }
+    await writeAndWaitForChanges(watcher, files[0]);
 
     files.forEach((file) => writeFileSync(file, '1'));
     files.forEach((file) => writeFileSync(file, '2'));
@@ -146,6 +189,26 @@ describe('watch mode file watcher', () => {
     assert.strictEqual(changesCount, 1);
   });
 
+  it('should unfilter every dependency of an unfiltered owner', async () => {
+    const owner = tmpdir.resolve('owner.js');
+    const dependency1 = tmpdir.resolve('owner-dependency-1.js');
+    const dependency2 = tmpdir.resolve('owner-dependency-2.js');
+    for (const file of [owner, dependency1, dependency2]) {
+      writeFileSync(file, 'written');
+    }
+
+    watcher.filterFile(owner);
+    watcher.filterFile(dependency1, owner);
+    watcher.filterFile(dependency2, owner);
+    watcher.unfilterFilesOwnedBy([owner]);
+
+    watcher.on('changed', common.mustNotCall());
+    writeFileSync(dependency1, '1');
+    writeFileSync(dependency2, '2');
+    // Wait for this long to make sure changes are not triggered
+    await setTimeout(1000);
+  });
+
   it('should watch all files in watched path when in "all" mode',
      { skip: !supportsRecursiveWatching }, async () => {
        watcher = new FilesWatcher({ debounce: 100, mode: 'all' });
@@ -154,10 +217,7 @@ describe('watch mode file watcher', () => {
        const file = tmpdir.resolve('file5');
        watcher.watchPath(tmpdir.path);
 
-       const changed = once(watcher, 'changed');
-       await setTimeout(common.platformTimeout(100)); // avoid throttling
-       writeFileSync(file, 'changed');
-       await changed;
+       await writeAndWaitForChanges(watcher, file);
        assert.strictEqual(changesCount, 1);
      });
 
@@ -205,7 +265,9 @@ describe('watch mode file watcher', () => {
     watcher.watchChildProcessModules(child);
     await once(child, 'exit');
     let expected = [file, tmpdir.resolve('file')];
-    if (supportsRecursiveWatching) {
+    if (watchesParentDirectory) {
+      // The parent directory is watched so that files replaced via
+      // unlink+create or rename are still detected.
       expected = expected.map((file) => path.dirname(file));
     }
     assert.deepStrictEqual(watcher.watchedPaths, expected);

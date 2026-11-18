@@ -9,7 +9,6 @@
 
 #include "src/common/checks.h"
 #include "src/execution/isolate.h"
-#include "src/objects/descriptor-array.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/map.h"
 #include "src/objects/maybe-object.h"
@@ -186,8 +185,13 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
   static bool PutPrototypeTransition(Isolate* isolate, DirectHandle<Map>,
                                      DirectHandle<Object> prototype,
                                      DirectHandle<Map> target_map);
-  static std::optional<Tagged<Map>> GetPrototypeTransition(
+
+  std::optional<Tagged<Map>> GetPrototypeTransition(Tagged<Object> prototype);
+  // Convenient helper for calling from the main thread, for other cases
+  // use the instance method above.
+  static inline std::optional<Tagged<Map>> GetPrototypeTransition(
       Isolate* isolate, Tagged<Map> map, Tagged<Object> prototype);
+
   bool HasPrototypeTransitions();
 
   // During the first-time Map::Update and Map::TryUpdate, the migration target
@@ -268,8 +272,7 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
   static void SetPrototypeTransitions(
       Isolate* isolate, DirectHandle<Map> map,
       DirectHandle<WeakFixedArray> proto_transitions);
-  static Tagged<WeakFixedArray> GetPrototypeTransitions(Isolate* isolate,
-                                                        Tagged<Map> map);
+  Tagged<WeakFixedArray> GetPrototypeTransitions();
 
   static void InsertHelper(Isolate* isolate, DirectHandle<Map> map,
                            DirectHandle<Name> name, DirectHandle<Map> target,
@@ -312,7 +315,9 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
 // [4 + number of transitions * kTransitionSize]: start of slack
 // TODO(olivf): The slots for prototype transitions and side-steps could be
 // shared.
-class TransitionArray : public WeakFixedArray {
+V8_OBJECT class TransitionArray : public WeakFixedArray {
+  V8_IT_NO_AUTO_DISPATCH;
+
  public:
   // Do linear search for small arrays, and for searches in the background
   // thread.
@@ -352,7 +357,7 @@ class TransitionArray : public WeakFixedArray {
   static const int kPrototypeTransitionsIndex = 0;
   static const int kSideStepTransitionsIndex = 1;
   static const int kTransitionLengthIndex = 2;
-  static const int kFirstIndex = 3;
+  static const uint32_t kFirstIndex = 3;
 
   // Layout of map transition entries in full transition arrays.
   static const int kEntryKeyIndex = 0;
@@ -361,10 +366,12 @@ class TransitionArray : public WeakFixedArray {
 
   // Conversion from transition number to array indices.
   static int ToKeyIndex(int transition_number) {
+    // TODO(375937549): Consider returning uint32_t.
     return kFirstIndex + (transition_number * kEntrySize) + kEntryKeyIndex;
   }
 
   static int ToTargetIndex(int transition_number) {
+    // TODO(375937549): Consider returning uint32_t.
     return kFirstIndex + (transition_number * kEntrySize) + kEntryTargetIndex;
   }
 
@@ -392,23 +399,24 @@ class TransitionArray : public WeakFixedArray {
   // Cache format:
   //    0: finger - index of the first free cell in the cache
   //    1 + i: target map
-  static const int kProtoTransitionHeaderSize = 1;
-  static const int kMaxCachedPrototypeTransitions = 256;
+  static const uint32_t kProtoTransitionHeaderSize = 1;
+  static const uint32_t kMaxCachedPrototypeTransitions = 256;
 
   inline void SetPrototypeTransitions(
       Tagged<WeakFixedArray> prototype_transitions);
 
-  static inline int NumberOfPrototypeTransitions(
+  static inline uint32_t NumberOfPrototypeTransitions(
       Tagged<WeakFixedArray> proto_transitions);
   static void SetNumberOfPrototypeTransitions(
-      Tagged<WeakFixedArray> proto_transitions, int value);
+      Tagged<WeakFixedArray> proto_transitions, uint32_t value);
 
-  static const int kProtoTransitionNumberOfEntriesOffset = 0;
+  static const uint32_t kProtoTransitionNumberOfEntriesOffset = 0;
   static_assert(kProtoTransitionHeaderSize == 1);
 
   // Returns the fixed array length required to hold number_of_transitions
   // transitions.
   static int LengthFor(int number_of_transitions) {
+    // TODO(375937549): Consider returning uint32_t.
     return ToKeyIndex(number_of_transitions);
   }
 
@@ -443,7 +451,8 @@ class TransitionArray : public WeakFixedArray {
                                               Tagged<WeakFixedArray> array);
 
   static DirectHandle<WeakFixedArray> GrowPrototypeTransitionArray(
-      DirectHandle<WeakFixedArray> array, int new_capacity, Isolate* isolate);
+      DirectHandle<WeakFixedArray> array, uint32_t new_capacity,
+      Isolate* isolate);
 
   // Compares two tuples <key, kind, attributes>, returns -1 if
   // tuple1 is "less" than tuple2, 0 if tuple1 equal to tuple2 and 1 otherwise.
@@ -471,7 +480,7 @@ class TransitionArray : public WeakFixedArray {
 
   inline Tagged<WeakFixedArray> GetSideStepTransitions();
   inline void SetSideStepTransitions(Tagged<WeakFixedArray> transitions);
-};
+} V8_OBJECT_END;
 
 }  // namespace v8::internal
 

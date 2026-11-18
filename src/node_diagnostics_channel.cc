@@ -3,6 +3,7 @@
 #include "base_object-inl.h"
 #include "env-inl.h"
 #include "node_external_reference.h"
+#include "node_internals.h"
 #include "util-inl.h"
 #include "v8.h"
 
@@ -42,6 +43,21 @@ BindingData::BindingData(Realm* realm,
     subscribers_.Deserialize(realm->context());
   }
   subscribers_.MakeWeak();
+}
+
+void BindingData::DetachChannels() {
+  // A native holder may keep a strong reference to a Channel that outlives this
+  // binding's ownership of it, and the binding is destroyed during environment
+  // cleanup while BaseObject destructors still run after it. Drop the
+  // back-pointer so that the null check in HasSubscribers() stops those holders
+  // from reading the subscribers_ array of a binding that no longer owns them.
+  for (auto& channel : channels_) {
+    if (channel) channel->binding_data_ = nullptr;
+  }
+}
+
+BindingData::~BindingData() {
+  DetachChannels();
 }
 
 void BindingData::MemoryInfo(MemoryTracker* tracker) const {
@@ -94,6 +110,7 @@ void BindingData::LinkNativeChannel(const FunctionCallbackInfo<Value>& args) {
       }
     }
   }
+  realm->env()->InitializeThreadPoolWorkChannels();
 }
 
 bool BindingData::PrepareForSerialization(Local<Context> context,
@@ -102,17 +119,16 @@ bool BindingData::PrepareForSerialization(Local<Context> context,
   internal_field_info_ = InternalFieldInfoBase::New<InternalFieldInfo>(type());
   internal_field_info_->subscribers = subscribers_.Serialize(context, creator);
   internal_field_info_->subscribers_capacity = subscribers_.Length();
+  channel_status_callbacks_.clear();
   link_callback_.Reset();
   channel_wrap_template_.Reset();
+  DetachChannels();
   channels_.clear();
   return true;
 }
 
 InternalFieldInfoBase* BindingData::Serialize(int index) {
-  DCHECK_IS_SNAPSHOT_SLOT(index);
-  InternalFieldInfo* info = internal_field_info_;
-  internal_field_info_ = nullptr;
-  return info;
+  return TakeInternalFieldInfo(index, &internal_field_info_);
 }
 
 void BindingData::Deserialize(Local<Context> context,
@@ -120,17 +136,42 @@ void BindingData::Deserialize(Local<Context> context,
                               int index,
                               InternalFieldInfoBase* info) {
   DCHECK_IS_SNAPSHOT_SLOT(index);
-  HandleScope scope(Isolate::GetCurrent());
-  Realm* realm = Realm::GetCurrent(context);
-  BindingData* binding = realm->AddBindingData<BindingData>(
-      holder, static_cast<InternalFieldInfo*>(info));
-  CHECK_NOT_NULL(binding);
+  Realm::DeserializeBindingData<BindingData>(
+      context, holder, static_cast<InternalFieldInfo*>(info));
+}
+
+void BindingData::SetChannelStatusCallback(uint32_t index,
+                                           ChannelStatusCallback cb) {
+  channel_status_callbacks_[index] = std::move(cb);
+}
+
+void BindingData::NotifyChannelActive(const FunctionCallbackInfo<Value>& args) {
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding = realm->GetBindingData<BindingData>();
+  if (binding == nullptr) return;
+  CHECK(args[0]->IsUint32());
+  uint32_t index = args[0].As<v8::Uint32>()->Value();
+  auto it = binding->channel_status_callbacks_.find(index);
+  if (it != binding->channel_status_callbacks_.end()) it->second(true);
+}
+
+void BindingData::NotifyChannelInactive(
+    const FunctionCallbackInfo<Value>& args) {
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding = realm->GetBindingData<BindingData>();
+  if (binding == nullptr) return;
+  CHECK(args[0]->IsUint32());
+  uint32_t index = args[0].As<v8::Uint32>()->Value();
+  auto it = binding->channel_status_callbacks_.find(index);
+  if (it != binding->channel_status_callbacks_.end()) it->second(false);
 }
 
 void BindingData::CreatePerIsolateProperties(IsolateData* isolate_data,
                                              Local<ObjectTemplate> target) {
   Isolate* isolate = isolate_data->isolate();
   SetMethod(isolate, target, "linkNativeChannel", LinkNativeChannel);
+  SetMethod(isolate, target, "notifyChannelActive", NotifyChannelActive);
+  SetMethod(isolate, target, "notifyChannelInactive", NotifyChannelInactive);
 }
 
 void BindingData::CreatePerContextProperties(Local<Object> target,
@@ -145,6 +186,8 @@ void BindingData::CreatePerContextProperties(Local<Object> target,
 void BindingData::RegisterExternalReferences(
     ExternalReferenceRegistry* registry) {
   registry->Register(LinkNativeChannel);
+  registry->Register(NotifyChannelActive);
+  registry->Register(NotifyChannelInactive);
 }
 
 Channel::Channel(Environment* env,
@@ -250,8 +293,6 @@ void Channel::CachePublishFn(Isolate* isolate, Local<Object> js_channel) {
 
 void Channel::Publish(Environment* env, Local<Value> message) {
   if (!HasSubscribers()) return;
-
-  if (binding_data_ == nullptr) return;
 
   if (js_channel_.IsEmpty()) return;
 

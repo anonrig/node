@@ -2,7 +2,6 @@
 
 const common = require('../common');
 const assert = require('assert');
-const { TextDecoder } = require('util');
 const {
   writeFileSync,
   openAsBlob,
@@ -127,6 +126,19 @@ writeFileSync(testfile5, '');
   const reader = stream.getReader();
   await assert.rejects(() => reader.read(), { name: 'NotReadableError' });
   await unlink(testfile5);
+})().then(common.mustCall());
+
+(async () => {
+  // A path that cannot be stat'd reports the underlying libuv error rather
+  // than a generic argument error, so ENOENT can be told apart from any other
+  // reason the file could not be used.
+  // Refs: https://github.com/nodejs/node/issues/65514
+  const missing = tmpdir.resolve('does-not-exist.txt');
+  await assert.rejects(async () => openAsBlob(missing), {
+    code: 'ENOENT',
+    syscall: 'stat',
+    path: missing,
+  });
 })().then(common.mustCall());
 
 (async () => {

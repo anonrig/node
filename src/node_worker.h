@@ -36,12 +36,12 @@ class Worker : public AsyncWrap {
          std::shared_ptr<PerIsolateOptions> per_isolate_opts,
          std::vector<std::string>&& exec_argv,
          std::shared_ptr<KVStore> env_vars,
-         const SnapshotData* snapshot_data,
-         const bool is_internal);
+         const SnapshotData* snapshot_data);
   ~Worker() override;
 
   // Run the worker. This is only called from the worker thread.
   void Run();
+  bool UseWorkerContextSnapshot() const;
 
   // Forcibly exit the thread with a specified exit code. This may be called
   // from any thread. `error_code` and `error_message` can be used to create
@@ -63,8 +63,11 @@ class Worker : public AsyncWrap {
 
   bool is_stopped() const;
   const SnapshotData* snapshot_data() const { return snapshot_data_; }
-  bool is_internal() const { return is_internal_; }
   std::string_view name() const { return name_; }
+  uint64_t thread_id() const { return thread_id_.id; }
+  // Whether the Worker keeps the parent's event loop alive, see
+  // `worker.ref()` and `worker.unref()`. Only valid on the parent thread.
+  bool has_ref() const { return has_ref_; }
 
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void StartThread(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -141,7 +144,6 @@ class Worker : public AsyncWrap {
   Environment* env_ = nullptr;
 
   const SnapshotData* snapshot_data_ = nullptr;
-  const bool is_internal_;
   friend class WorkerThreadData;
 };
 

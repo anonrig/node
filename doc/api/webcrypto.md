@@ -3,6 +3,11 @@
 <!-- YAML
 changes:
   - version:
+    - v26.10.0
+    - v24.22.0
+    pr-url: https://github.com/nodejs/node/pull/65759
+    description: Hybrid KEM algorithms are now supported.
+  - version:
      - v25.9.0
      - v24.18.0
     pr-url: https://github.com/nodejs/node/pull/62183
@@ -119,15 +124,15 @@ WICG proposal:
 
 Algorithms:
 
-* `'AES-OCB'`[^openssl30]
+* `'AES-OCB'`[^noboringssl]
 * `'Argon2d'`[^openssl32]
 * `'Argon2i'`[^openssl32]
 * `'Argon2id'`[^openssl32]
 * `'ChaCha20-Poly1305'`
 * `'cSHAKE128'`
 * `'cSHAKE256'`
-* `'KMAC128'`[^openssl30]
-* `'KMAC256'`[^openssl30]
+* `'KMAC128'`[^noboringssl]
+* `'KMAC256'`[^noboringssl]
 * `'KT128'`
 * `'KT256'`
 * `'ML-DSA-44'`[^openssl35]
@@ -136,6 +141,9 @@ Algorithms:
 * `'ML-KEM-512'`[^openssl35]
 * `'ML-KEM-768'`[^openssl35]
 * `'ML-KEM-1024'`[^openssl35]
+* `'MLKEM768-P256'`[^openssl35]
+* `'MLKEM768-X25519'`[^openssl35]
+* `'MLKEM1024-P384'`[^openssl35]
 * `'SHA3-256'`
 * `'SHA3-384'`
 * `'SHA3-512'`
@@ -531,9 +539,10 @@ Crypto API implementation and the APIs supported for each:
   `'ECDSA'`, `'Ed25519'`, `'Ed448'`[^secure-curves],
   `'ML-DSA-44'`[^modern-algos], `'ML-DSA-65'`[^modern-algos],
   `'ML-DSA-87'`[^modern-algos], `'ML-KEM-512'`[^modern-algos],
-  `'ML-KEM-768'`[^modern-algos], `'ML-KEM-1024'`[^modern-algos], `'RSA-OAEP'`,
-  `'RSA-PSS'`, `'RSASSA-PKCS1-v1_5'`, `'X25519'`, and
-  `'X448'`[^secure-curves].
+  `'ML-KEM-768'`[^modern-algos], `'ML-KEM-1024'`[^modern-algos],
+  `'MLKEM768-P256'`[^modern-algos], `'MLKEM768-X25519'`[^modern-algos],
+  `'MLKEM1024-P384'`[^modern-algos], `'RSA-OAEP'`, `'RSA-PSS'`,
+  `'RSASSA-PKCS1-v1_5'`, `'X25519'`, and `'X448'`[^secure-curves].
 
 ### Crypto Operation APIs
 
@@ -553,8 +562,10 @@ Crypto API implementation and the APIs supported for each:
   `'ChaCha20-Poly1305'`[^modern-algos], and `'RSA-OAEP'`.
 * [`subtle.encapsulateBits()`][], [`subtle.decapsulateBits()`][],
   [`subtle.encapsulateKey()`][], and [`subtle.decapsulateKey()`][] support
-  `'ML-KEM-512'`[^modern-algos], `'ML-KEM-768'`[^modern-algos], and
-  `'ML-KEM-1024'`[^modern-algos].
+  `'ML-KEM-512'`[^modern-algos], `'ML-KEM-768'`[^modern-algos],
+  `'ML-KEM-1024'`[^modern-algos], `'MLKEM768-P256'`[^modern-algos],
+  `'MLKEM768-X25519'`[^modern-algos], and
+  `'MLKEM1024-P384'`[^modern-algos].
 * [`subtle.digest()`][] supports `'cSHAKE128'`[^modern-algos],
   `'cSHAKE256'`[^modern-algos], `'KT128'`[^modern-algos],
   `'KT256'`[^modern-algos], `'SHA-1'`, `'SHA-256'`, `'SHA-384'`, `'SHA-512'`,
@@ -586,6 +597,10 @@ and [`subtle.exportKey()`][].
   `'ML-KEM-768'`[^modern-algos], and `'ML-KEM-1024'`[^modern-algos]** can be
   imported and exported using `'spki'`, `'pkcs8'`, `'jwk'`,
   `'raw-public'`[^modern-algos], and `'raw-seed'`[^modern-algos].
+* **`'MLKEM768-P256'`[^modern-algos],
+  `'MLKEM768-X25519'`[^modern-algos], and
+  `'MLKEM1024-P384'`[^modern-algos]** can be imported and exported using
+  `'jwk'`, `'raw-public'`[^modern-algos], and `'raw-seed'`[^modern-algos].
 * **`'RSA-OAEP'`, `'RSA-PSS'`, and `'RSASSA-PKCS1-v1_5'`** can be imported
   and exported using `'spki'`, `'pkcs8'`, and `'jwk'`.
 
@@ -790,6 +805,9 @@ The algorithms currently supported include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 
 ### `subtle.decapsulateKey(decapsulationAlgorithm, decapsulationKey, ciphertext, sharedKeyAlgorithm, extractable, keyUsages)`
 
@@ -816,6 +834,9 @@ The algorithms currently supported include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 
 ### `subtle.decrypt(algorithm, key, data)`
 
@@ -1014,6 +1035,9 @@ The algorithms currently supported include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 
 ### `subtle.encapsulateKey(encapsulationAlgorithm, encapsulationKey, sharedKeyAlgorithm, extractable, keyUsages)`
 
@@ -1038,6 +1062,9 @@ The algorithms currently supported include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 
 ### `subtle.encrypt(algorithm, key, data)`
 
@@ -1076,6 +1103,11 @@ The algorithms currently supported include:
 <!-- YAML
 added: v15.0.0
 changes:
+  - version:
+    - v26.10.0
+    - v24.22.0
+    pr-url: https://github.com/nodejs/node/pull/65759
+    description: Hybrid KEM algorithms are now supported.
   - version:
     - v26.1.0
     - v24.18.0
@@ -1142,6 +1174,11 @@ Derives the public key from a given private key.
 <!-- YAML
 added: v15.0.0
 changes:
+  - version:
+    - v26.10.0
+    - v24.22.0
+    pr-url: https://github.com/nodejs/node/pull/65759
+    description: Hybrid KEM algorithms are now supported.
   - version: v24.8.0
     pr-url: https://github.com/nodejs/node/pull/59647
     description: KMAC algorithms are now supported.
@@ -1183,6 +1220,9 @@ include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 * `'RSA-OAEP'`
 * `'RSA-PSS'`
 * `'RSASSA-PKCS1-v1_5'`
@@ -1206,6 +1246,11 @@ The {CryptoKey} (secret key) generating algorithms supported include:
 <!-- YAML
 added: v15.0.0
 changes:
+  - version:
+    - v26.10.0
+    - v24.22.0
+    pr-url: https://github.com/nodejs/node/pull/65759
+    description: Hybrid KEM algorithms are now supported.
   - version:
     - v26.1.0
     - v24.18.0
@@ -1379,6 +1424,9 @@ The unwrapped key algorithms supported include:
 * `'ML-KEM-512'`[^modern-algos]
 * `'ML-KEM-768'`[^modern-algos]
 * `'ML-KEM-1024'`[^modern-algos]
+* `'MLKEM768-P256'`[^modern-algos]
+* `'MLKEM768-X25519'`[^modern-algos]
+* `'MLKEM1024-P384'`[^modern-algos]
 * `'RSA-OAEP'`
 * `'RSA-PSS'`
 * `'RSASSA-PKCS1-v1_5'`
@@ -1802,6 +1850,9 @@ changes:
     description: Renamed `cShakeParams.length` to `cShakeParams.outputLength`.
 -->
 
+When both `functionName` and `customization` are empty or `undefined`, cSHAKE is
+equivalent to plain SHAKE.
+
 #### `cShakeParams.name`
 
 <!-- YAML
@@ -1818,7 +1869,8 @@ added:
  - v24.15.0
 -->
 
-* Type: {number} represents the requested output length in bits.
+* Type: {number} represents the requested output length in bits. Must be a
+  multiple of 8.
 
 #### `cShakeParams.functionName`
 
@@ -1835,9 +1887,10 @@ changes:
 * Type: {ArrayBuffer|TypedArray|DataView|Buffer|undefined}
 
 The `functionName` member represents the NIST function-name byte string used to
-domain-separate functions built on top of cSHAKE. Accepted values are:
+domain-separate functions built on top of cSHAKE. Non-empty values require
+OpenSSL 4.0 or later. Accepted values are:
 
-* empty or `undefined`, in which case cSHAKE is equivalent to plain SHAKE
+* empty or `undefined`
 * the ASCII byte sequence `'KMAC'`
 * the ASCII byte sequence `'TupleHash'`
 * the ASCII byte sequence `'ParallelHash'`
@@ -1856,11 +1909,11 @@ changes:
 
 * Type: {ArrayBuffer|TypedArray|DataView|Buffer|undefined}
 
-The `customization` member represents the customization data. Accepted
-values are:
+The `customization` member represents the customization data. Non-empty values
+require OpenSSL 4.0 or later. Accepted values are:
 
-* empty or `undefined`, in which case cSHAKE is equivalent to plain SHAKE
-* up to 512 bytes of arbitrary data
+* empty or `undefined`
+* up to 512 bytes of data without null bytes
 
 ### Class: `EcdhKeyDeriveParams`
 
@@ -2273,7 +2326,9 @@ added:
  - v25.9.0
  - v24.18.0
 changes:
-  - version: v26.6.0
+  - version:
+     - v26.6.0
+     - v24.20.0
     pr-url: https://github.com/nodejs/node/pull/64557
     description: Limit customization to 512 bytes.
 -->
@@ -2318,7 +2373,7 @@ added: v24.8.0
 * Type: {number}
 
 The optional number of bits in the KMAC key. This is optional and should
-be omitted for most cases.
+be omitted for most cases. The key length must be at least 32 and a multiple of 8.
 
 #### `kmacImportParams.name`
 
@@ -2368,7 +2423,8 @@ added: v24.8.0
 
 The number of bits to generate for the KMAC key. If omitted,
 the length will be determined by the KMAC algorithm used.
-This is optional and should be omitted for most cases.
+This is optional and should be omitted for most cases. Must be at least 32 and a
+multiple of 8.
 
 #### `kmacKeyGenParams.name`
 
@@ -2406,7 +2462,8 @@ added:
  - v24.15.0
 -->
 
-* Type: {number} represents the requested output length in bits.
+* Type: {number} represents the requested output length in bits. Must be a
+  multiple of 8.
 
 #### `kmacParams.customization`
 
@@ -2719,7 +2776,7 @@ added:
 
 [^modern-algos]: See [Modern Algorithms in the Web Cryptography API][]
 
-[^openssl30]: Requires OpenSSL >= 3.0
+[^noboringssl]: Not available when Node.js is built against BoringSSL
 
 [^openssl32]: Requires OpenSSL >= 3.2
 

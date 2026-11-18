@@ -28,7 +28,8 @@ class WasmGraphAssembler : public GraphAssembler {
  public:
   WasmGraphAssembler(MachineGraph* mcgraph, Zone* zone)
       : GraphAssembler(mcgraph, zone, BranchSemantics::kMachine),
-        simplified_(zone) {}
+        simplified_(zone),
+        common_(zone) {}
 
   // While CallBuiltin() translates to a direct call to the address of the
   // builtin, CallBuiltinThroughJumptable instead jumps to a slot in a jump
@@ -177,15 +178,8 @@ class WasmGraphAssembler : public GraphAssembler {
                                            ExternalPointerTagRange tag_range,
                                            Node* isolate_root);
 
-  Node* LoadImmutableTrustedPointerFromObject(Node* object, int offset,
-                                              IndirectPointerTagRange tag);
   Node* LoadTrustedPointerFromObject(Node* object, int offset,
                                      IndirectPointerTagRange tag);
-  // Returns the load node (where the source position for the trap needs to be
-  // set by the caller) and the result.
-  std::pair<Node*, Node*> LoadTrustedPointerFromObjectTrapOnNull(
-      Node* object, int offset, IndirectPointerTagRange tag);
-  Node* BuildDecodeTrustedPointer(Node* handle, IndirectPointerTagRange tag);
 
   Node* IsSmi(Node* object);
 
@@ -200,8 +194,6 @@ class WasmGraphAssembler : public GraphAssembler {
   Node* LoadWasmTypeInfo(Node* map);
 
   // FixedArrays.
-
-  Node* LoadFixedArrayLengthAsSmi(Node* fixed_array);
 
   Node* LoadFixedArrayElement(Node* fixed_array, Node* index_intptr,
                               MachineType type = MachineType::AnyTagged());
@@ -254,8 +246,6 @@ class WasmGraphAssembler : public GraphAssembler {
   Node* LoadContextNoCellFromJSFunction(Node* js_function);
 
   Node* LoadFunctionDataFromJSFunction(Node* js_function);
-
-  Node* LoadExportedFunctionIndexAsSmi(Node* exported_function_data);
 
   Node* LoadExportedFunctionInstanceData(Node* exported_function_data);
 
@@ -314,6 +304,8 @@ class WasmGraphAssembler : public GraphAssembler {
   // Generic helpers.
 
   Node* HasInstanceType(Node* heap_object, InstanceType type);
+  Node* HasInstanceTypeInRange(Node* heap_object, InstanceType lower_limit,
+                               InstanceType higher_limit);
 
   void TrapIf(Node* condition, TrapId reason) {
     // Initially wasm traps don't have a FrameState.
@@ -347,6 +339,7 @@ class WasmGraphAssembler : public GraphAssembler {
   }
 
   SimplifiedOperatorBuilder simplified_;
+  CommonOperatorBuilder common_;
 };
 
 }  // namespace compiler

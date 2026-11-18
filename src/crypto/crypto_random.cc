@@ -15,6 +15,7 @@ using ncrypto::BignumPointer;
 using ncrypto::ClearErrorOnReturn;
 using ncrypto::DataPointer;
 using v8::ArrayBuffer;
+using v8::ArrayBufferView;
 using v8::Boolean;
 using v8::FunctionCallbackInfo;
 using v8::Int32;
@@ -30,6 +31,13 @@ using v8::Value;
 
 namespace crypto {
 namespace {
+bool IsImmutableBufferSource(Local<Value> buffer) {
+  if (buffer->IsArrayBufferView()) {
+    return buffer.As<ArrayBufferView>()->Buffer()->IsImmutable();
+  }
+  return buffer->IsArrayBuffer() && buffer.As<ArrayBuffer>()->IsImmutable();
+}
+
 BignumPointer::PrimeCheckCallback getPrimeCheckCallback(Environment* env) {
   // The callback is used to check if the operation should be stopped.
   // Currently, the only check we perform is if env->is_stopping()
@@ -51,6 +59,13 @@ Maybe<void> RandomBytesTraits::AdditionalConfig(
   CHECK(IsAnyBufferSource(args[offset]));  // Buffer to fill
   CHECK(args[offset + 1]->IsUint32());  // Offset
   CHECK(args[offset + 2]->IsUint32());  // Size
+
+  if (IsImmutableBufferSource(args[offset])) {
+    THROW_ERR_INVALID_ARG_VALUE(
+        Environment::GetCurrent(args),
+        "The 'buf' argument must not be backed by an immutable ArrayBuffer");
+    return Nothing<void>();
+  }
 
   ArrayBufferOrViewContents<unsigned char> in(args[offset]);
 
@@ -214,13 +229,53 @@ MaybeLocal<Value> CheckPrimeTraits::EncodeOutput(Environment* env,
 }
 
 namespace Random {
+static void RandomFillSync(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK(IsAnyBufferSource(args[0]));  // Buffer to fill
+  CHECK(args[1]->IsUint32());         // Offset
+  CHECK(args[2]->IsUint32());         // Size
+
+  if (IsImmutableBufferSource(args[0])) {
+    return THROW_ERR_INVALID_ARG_VALUE(
+        env,
+        "The 'buf' argument must not be backed by an immutable ArrayBuffer");
+  }
+
+  ArrayBufferOrViewContents<unsigned char> in(args[0]);
+
+  const uint32_t byte_offset = args[1].As<Uint32>()->Value();
+  const uint32_t size = args[2].As<Uint32>()->Value();
+  CHECK_GE(byte_offset + size, byte_offset);  // Overflow check.
+  CHECK_LE(byte_offset + size, in.size());    // Bounds check.
+
+  env->PrintSyncTrace();
+  if (ERR_peek_error() != 0) ERR_clear_error();
+  if (ncrypto::CSPRNG(in.data() + byte_offset, size)) {
+    if (ERR_peek_error() != 0) ERR_clear_error();
+    return;
+  }
+
+  CryptoErrorStore errors;
+  errors.Capture();
+  if (errors.Empty()) {
+    errors.Insert(NodeCryptoError::DERIVING_BITS_FAILED);
+    errors.SetNodeErrorCode("ERR_CRYPTO_OPERATION_FAILED");
+  }
+  Local<Value> exception;
+  if (errors.ToException(env).ToLocal(&exception)) {
+    env->isolate()->ThrowException(exception);
+  }
+}
+
 void Initialize(Environment* env, Local<Object> target) {
+  SetMethod(env->context(), target, "randomFillSync", RandomFillSync);
   RandomBytesJob::Initialize(env, target);
   RandomPrimeJob::Initialize(env, target);
   CheckPrimeJob::Initialize(env, target);
 }
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(RandomFillSync);
   RandomBytesJob::RegisterExternalReferences(registry);
   RandomPrimeJob::RegisterExternalReferences(registry);
   CheckPrimeJob::RegisterExternalReferences(registry);

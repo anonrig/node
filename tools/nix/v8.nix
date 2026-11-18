@@ -23,6 +23,12 @@
 }:
 
 let
+  useSharedAbseil = builtins.elem "--shared-abseil" configureFlags;
+  useSharedHighway = builtins.elem "--shared-highway" configureFlags;
+  useSharedPerfetto = builtins.elem "--shared-perfetto" configureFlags;
+  useSharedSimdutf = builtins.elem "--shared-simdutf" configureFlags;
+  useSharedTemporal = builtins.elem "--shared-temporal_capi" configureFlags;
+
   src =
     let
       inherit (lib) fileset;
@@ -31,11 +37,8 @@ let
         ../../common.gypi
         ../../configure.py
         ../../deps/v8
-        ../../node.gyp
-        ../../node.gypi
         ../../tools/gyp/pylib
         ../../tools/gyp_node.py
-        ../../tools/v8_gypfiles/abseil.gyp
         ../../tools/v8_gypfiles/features.gypi
         ../../tools/v8_gypfiles/ForEachFormat.py
         ../../tools/v8_gypfiles/ForEachReplace.py
@@ -44,9 +47,18 @@ let
         ../../tools/v8_gypfiles/toolchain.gypi
         ../../tools/v8_gypfiles/v8.gyp
       ]
-      ++ lib.optionals (builtins.elem "--with-perfetto" configureFlags) [
-        ../../deps/perfetto
-      ]
+      ++ lib.optional (!useSharedAbseil) ../../tools/v8_gypfiles/abseil.gyp
+      ++ lib.optional (!useSharedHighway) ../../tools/v8_gypfiles/highway.gyp
+      ++ lib.optional (!useSharedSimdutf) ../../tools/v8_gypfiles/simdutf.gyp
+      ++ lib.optional (
+        if useSharedTemporal then
+          icu == null
+        else
+          !(builtins.elem "--v8-disable-temporal-support" configureFlags)
+      ) ../../deps/crates
+      ++ lib.optional (
+        builtins.elem "--with-perfetto" configureFlags && !useSharedPerfetto
+      ) ../../deps/perfetto
       ++ lib.optionals (icu != null) [
         ../../tools/icu/icu_versions.json
         ../../tools/icu/icu-system.gyp
@@ -63,12 +75,17 @@ let
       potentiallyAlreadyRemovedFiles =
         # Files that are removed in the release tarball (see Makefile $(TARBALL) target)
         [ (fileset.difference ../../deps/v8/test ../../deps/v8/test/torque) ]
-        ++ (builtins.filter builtins.pathExists [
-          ../../deps/v8/samples
-          ../../deps/v8/tools/profviz
-          ../../deps/v8/tools/run-tests.py
-          ../../deps/v8/third_party/ittapi
-        ]);
+        ++ (builtins.filter builtins.pathExists (
+          [
+            ../../deps/v8/samples
+            ../../deps/v8/tools/profviz
+            ../../deps/v8/tools/run-tests.py
+            ../../deps/v8/third_party/ittapi
+          ]
+          ++ lib.optional useSharedAbseil ../../deps/v8/third_party/abseil-cpp
+          ++ lib.optional useSharedHighway ../../deps/v8/third_party/highway
+          ++ lib.optional useSharedSimdutf ../../deps/v8/third_party/simdutf
+        ));
       trackedFiles =
         ({
           # This line is being modified by Makefile $(TARBALL) target, any change to it should be sync
@@ -100,14 +117,9 @@ stdenv.mkDerivation (finalAttrs: {
     else
       "${builtins.elemAt v8Version 0}.${builtins.elemAt v8Version 1}.${builtins.elemAt v8Version 2}.${builtins.elemAt v8Version 3}-${builtins.elemAt v8_embedder_string 0}";
 
-  patches = lib.optional (
-    # V8 accesses internal ICU headers and methods in the Temporal files.
-    !(builtins.isString icu) && builtins.elem "--v8-enable-temporal-support" configureFlags
-  ) ./temporal-no-vendored-icu.patch;
-
   # We need to patch tools/gyp/ to work from within Nix sandbox
   prePatch = ''
-    ${lib.optionalString (builtins.length finalAttrs.patches == 0) "patches=()"}
+    ${lib.optionalString (builtins.length (finalAttrs.patches or [ ]) == 0) "patches=()"}
     for patch in ${lib.concatStringsSep " " patches}; do
       filtered=$(mktemp)
       filterdiff -p1 -i 'tools/gyp/pylib/*' "$patch" > "$filtered"
@@ -140,9 +152,26 @@ stdenv.mkDerivation (finalAttrs: {
       return []
     EOF
   '';
-  # We need to remove the node_inspector.gypi ref so GYP does not search for it.
+  # To avoid invalidating cached build on unrelated `node.gyp` and `node.gypi` changes,
+  # we stub `node.gyp` to only reference the targets needed to build V8.
   postPatch = ''
-    substituteInPlace node.gyp --replace-fail "'includes' : [ 'src/inspector/node_inspector.gypi' ]" "'includes' : []"
+    cat -> node.gyp <<'EOF'
+    ${builtins.toJSON {
+      targets = [
+        {
+          target_name = "v8_deps_root";
+          type = "none";
+          dependencies = lib.unique (
+            builtins.concatLists (
+              builtins.filter builtins.isList (
+                builtins.split "'(tools/v8_gypfiles/v8\\.gyp:[A-Za-z0-9_]+)'" (builtins.readFile ../../node.gypi)
+              )
+            )
+          );
+        }
+      ];
+    }}
+    EOF
   ''
   + lib.optionalString (icu == null) ''
     substituteInPlace configure.py \
@@ -165,7 +194,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   buildPhase = ''
     runHook preBuild
-    ninja -v -C out/Release v8_snapshot v8_libplatform
+    ninja -v -C out/Release v8_deps_root
     runHook postBuild
   '';
   installPhase = ''
@@ -193,13 +222,17 @@ stdenv.mkDerivation (finalAttrs: {
         ''
     }
 
-    install -Dm644 deps/v8/third_party/simdutf/simdutf.h -t $out/include
+    ${lib.optionalString (
+      !useSharedSimdutf
+    ) "install -Dm644 deps/v8/third_party/simdutf/simdutf.h -t $out/include"}
     find deps/v8/include -name '*.h' -print0 | while read -r -d "" file; do
       install -Dm644 "$file" -T "$out/include/''${file#deps/v8/include/}"
     done
-    find deps/v8/third_party/abseil-cpp/absl -name '*.h' -print0 | while read -r -d "" file; do
-      install -Dm644 "$file" -T "$out/include/''${file#deps/v8/third_party/abseil-cpp/}"
-    done
+    ${lib.optionalString (!useSharedAbseil) ''
+      find deps/v8/third_party/abseil-cpp/absl -name '*.h' -print0 | while read -r -d "" file; do
+        install -Dm644 "$file" -T "$out/include/''${file#deps/v8/third_party/abseil-cpp/}"
+      done
+    ''}
 
     mkdir -p $out/lib/pkgconfig
     cat -> $out/lib/pkgconfig/v8.pc << EOF

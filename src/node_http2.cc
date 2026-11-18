@@ -205,6 +205,10 @@ Http2Options::Http2Options(Http2State* http2_state, SessionType type) {
   // this is a credit based system. Existing streams may cause the limit
   // to be temporarily exceeded but once over the limit, new streams cannot
   // created.
+  // Inbound DATA that is queued in the readable buffer of an undrained stream
+  // also counts against this limit, and when the limit is reached the session
+  // stops reading from the socket (applying backpressure) until the
+  // application consumes the data.
   // Important: The maxSessionMemory option in javascript is expressed in
   //            terms of MB increments (i.e. the value 1 == 1 MB)
   if (flags & (1 << IDX_OPTIONS_MAX_SESSION_MEMORY))
@@ -215,6 +219,11 @@ Http2Options::Http2Options(Http2State* http2_state, SessionType type) {
     nghttp2_option_set_max_settings(
         option,
         static_cast<size_t>(buffer[IDX_OPTIONS_MAX_SETTINGS]));
+  }
+
+  if (flags & (1 << IDX_OPTIONS_CONNECTION_WINDOW_SIZE)) {
+    set_connection_window_size(
+        static_cast<int32_t>(buffer[IDX_OPTIONS_CONNECTION_WINDOW_SIZE]));
   }
 
   if ((flags & (1 << IDX_OPTIONS_STREAM_RESET_BURST)) &&
@@ -612,15 +621,13 @@ Http2Session::Http2Session(Http2State* http2_state,
       &alloc_info), 0);
   session_.reset(session);
 
-  // Increase the default local connection window to improve throughput
-  // on high-latency connections. The default 64KB window limits throughput
-  // to window_size / RTT. With a 32MB connection window, throughput is
-  // significantly improved. See https://github.com/nodejs/node/issues/38426
+  // The default connection window is larger than the 64KB required by the
+  // spec to improve throughput on high-latency connections, where throughput
+  // is limited to window_size / RTT. User settings have to be applied here
+  // initially rather than updating later as windows cannot be shrunk after
+  // they've been advertised.
   CHECK_EQ(nghttp2_session_set_local_window_size(
-               session,
-               NGHTTP2_FLAG_NONE,
-               0,
-               DEFAULT_SETTINGS_LOCAL_CONNECTION_WINDOW_SIZE),
+               session, NGHTTP2_FLAG_NONE, 0, opts.connection_window_size()),
            0);
 
   outgoing_storage_.reserve(1024);
@@ -637,6 +644,9 @@ Http2Session::~Http2Session() {
   // Ensure that all `Http2Stream` instances and the memory they hold
   // on to are destroyed before the nghttp2 session is.
   for (const auto& [id, stream] : streams_) {
+    // Detach() only frees the stream if nothing else holds a strong
+    // reference to it.
+    stream->ClearHeaders();
     stream->Detach();
   }
   streams_.clear();
@@ -789,13 +799,25 @@ void Http2Session::HasPendingData(const FunctionCallbackInfo<Value>& args) {
 bool Http2Session::HasPendingData() const {
   nghttp2_session* session = session_.get();
   int want_write = nghttp2_session_want_write(session);
-  // It is expected that want_read will alway be 0 if graceful
+  // It is expected that want_read will always be 0 if graceful
   // session close is initiated and goaway frame is sent.
   int want_read = nghttp2_session_want_read(session);
   if (want_write == 0 && want_read == 0) {
     return false;
   }
   return true;
+}
+
+// nghttp2 signals that the connection should be dropped by having both
+// want_read and want_write return 0. If that happens while we still track
+// open streams, nghttp2 has terminated the session on its own (for example
+// due to a protocol error from the peer) and those streams will never be
+// completed.
+bool Http2Session::HasStreamsAbandonedByNghttp2() const {
+  if (HasPendingData()) return false;
+  return std::ranges::any_of(streams_, [](const auto& entry) {
+    return !entry.second->is_closed() && !entry.second->is_destroyed();
+  });
 }
 
 void Http2Session::EmitStatistics() {
@@ -826,19 +848,22 @@ void Http2Session::Close(uint32_t code, bool socket_closed) {
     return;
   set_closing();
 
+  pending_close_code_ = code;
+  pending_close_socket_closed_ = socket_closed;
+
   // Do not flush GOAWAY from inside nghttp2_session_mem_recv() callbacks.
   // ConsumeHTTP2Data() finishes the close once mem_recv returns.
   if (is_receiving()) {
     set_close_pending();
-    pending_close_code_ = code;
-    pending_close_socket_closed_ = socket_closed;
     return;
   }
 
   FinishClose(code, socket_closed);
 }
 
-void Http2Session::FinishClose(uint32_t code, bool socket_closed) {
+void Http2Session::FinishClose(uint32_t code,
+                               bool socket_closed,
+                               int write_status) {
   CHECK(is_closing());
 
   // Stop reading on the i/o stream
@@ -847,15 +872,20 @@ void Http2Session::FinishClose(uint32_t code, bool socket_closed) {
     stream_->ReadStop();
   }
 
-  // If the socket is not closed, then attempt to send a closing GOAWAY
+  // If the socket is still writable, attempt to send a closing GOAWAY
   // frame. There is no guarantee that this GOAWAY will be received by
   // the peer but the HTTP/2 spec recommends sending it anyway. We'll
   // make a best effort.
-  if (!socket_closed) {
+  if (!socket_closed && write_status == 0) {
     Debug(this, "terminating session with code %d", code);
     CHECK_EQ(nghttp2_session_terminate_session(session_.get(), code), 0);
-    SendPendingData();
-  } else if (stream_ != nullptr) {
+    if (SendPendingData() != 0) {
+      // An earlier write still owns the outgoing buffers. Keep the session
+      // alive until its completion lets us flush the terminal GOAWAY.
+      set_close_pending();
+      return;
+    }
+  } else if (socket_closed && stream_ != nullptr) {
     // so that the previous listener of the socket, typically, JS code of a
     // (tls) socket will be notified of any activity later
     stream_->RemoveStreamListener(this);
@@ -890,10 +920,12 @@ void Http2Session::FinishClose(uint32_t code, bool socket_closed) {
   EmitStatistics();
 }
 
-void Http2Session::MaybeFinishPendingClose() {
-  if (!is_close_pending() || is_destroyed()) return;
+void Http2Session::MaybeFinishPendingClose(int status) {
+  if (!is_close_pending() || is_destroyed() || is_receiving() || is_sending()) {
+    return;
+  }
   set_close_pending(false);
-  FinishClose(pending_close_code_, pending_close_socket_closed_);
+  FinishClose(pending_close_code_, pending_close_socket_closed_, status);
 }
 
 // Locates an existing known stream by ID. nghttp2 has a similar method
@@ -934,6 +966,11 @@ BaseObjectPtr<Http2Stream> Http2Session::RemoveStream(int32_t id) {
   stream = FindStream(id);
   if (stream) {
     streams_.erase(id);
+    // The stream can outlive the session, for example while one of its writes
+    // is still on the socket. Headers that were not passed to JS, such as an
+    // oversized block that caused the stream to be reset, hold nghttp2 memory
+    // that has to be released before the session is.
+    stream->ClearHeaders();
     if (stream->current_headers_length_ > 0) {
       DecrementCurrentSessionMemory(stream->current_headers_length_);
       stream->current_headers_length_ = 0;
@@ -942,8 +979,18 @@ BaseObjectPtr<Http2Stream> Http2Session::RemoveStream(int32_t id) {
       DecrementCurrentSessionMemory(stream->retained_headers_length_);
       stream->retained_headers_length_ = 0;
     }
+    if (stream->inbound_consumed_data_while_paused_memory_ > 0) {
+      DecrementCurrentSessionMemory(
+          stream->inbound_consumed_data_while_paused_memory_);
+      inbound_queued_data_memory_ -=
+          stream->inbound_consumed_data_while_paused_memory_;
+      stream->inbound_consumed_data_while_paused_memory_ = 0;
+    }
     DecrementCurrentSessionMemory(sizeof(*stream));
   }
+  // Removing the stream may have freed inbound data memory that was keeping
+  // the session from reading; resume if it now can make progress.
+  MaybeStartReading();
   return stream;
 }
 
@@ -959,7 +1006,7 @@ ssize_t Http2Session::OnDWordAlignedPadding(size_t frameLen,
   size_t pad = frameLen + (8 - r);
 
   // If maxPayloadLen happens to be less than the calculated pad length,
-  // use the max instead, even tho this means the frame will not be
+  // use the max instead, even though this means the frame will not be
   // aligned.
   pad = std::min(maxPayloadLen, pad);
   Debug(this, "using frame size padding: %d", pad);
@@ -981,45 +1028,24 @@ ssize_t Http2Session::OnMaxFrameSizePadding(size_t frameLen,
 // quite expensive. This is a potential performance optimization target later.
 void Http2Session::ConsumeHTTP2Data() {
   CHECK_NOT_NULL(stream_buf_.base);
-  CHECK_LE(stream_buf_offset_, stream_buf_.len);
-  size_t read_len = stream_buf_.len - stream_buf_offset_;
 
   // multiple side effects.
-  Debug(this, "receiving %d bytes [wants data? %d]",
-        read_len,
+  Debug(this,
+        "receiving %d bytes [wants data? %d]",
+        stream_buf_.len,
         nghttp2_session_want_read(session_.get()));
-  set_receive_paused(false);
   custom_recv_error_code_ = nullptr;
   set_receiving();
   ssize_t ret =
-    nghttp2_session_mem_recv(session_.get(),
-                             reinterpret_cast<uint8_t*>(stream_buf_.base) +
-                                 stream_buf_offset_,
-                             read_len);
+      nghttp2_session_mem_recv(session_.get(),
+                               reinterpret_cast<uint8_t*>(stream_buf_.base),
+                               stream_buf_.len);
   set_receiving(false);
   CHECK_NE(ret, NGHTTP2_ERR_NOMEM);
   CHECK_IMPLIES(custom_recv_error_code_ != nullptr, ret < 0);
 
-  if (is_receive_paused()) {
-    CHECK(is_reading_stopped());
-
-    CHECK_GT(ret, 0);
-    CHECK_LE(static_cast<size_t>(ret), read_len);
-
-    // Mark the remainder of the data as available for later consumption.
-    // Even if all bytes were received, a paused stream may delay the
-    // nghttp2_on_frame_recv_callback which may have an END_STREAM flag.
-    stream_buf_offset_ += ret;
-    // Still complete a Close() deferred during mem_recv; do not fall through
-    // to SendPendingData() here (paused receives historically skip that flush
-    // because a write may already be in progress).
-    MaybeFinishPendingClose();
-    goto done;
-  }
-
   // We are done processing the current input chunk.
   DecrementCurrentSessionMemory(stream_buf_.len);
-  stream_buf_offset_ = 0;
   stream_buf_ab_.Reset();
   stream_buf_allocation_.reset();
   stream_buf_ = uv_buf_init(nullptr, 0);
@@ -1027,14 +1053,6 @@ void Http2Session::ConsumeHTTP2Data() {
   // Finish a Close() deferred during mem_recv before flushing, so GOAWAY is
   // not written after pending RST_STREAM frames.
   MaybeFinishPendingClose();
-
-done:
-  // Finish a Close() deferred above before flushing, so GOAWAY is not written
-  // after pending RST_STREAM frames.
-  if (is_close_pending() && !is_destroyed()) {
-    set_close_pending(false);
-    FinishClose(pending_close_code_, pending_close_socket_closed_);
-  }
 
   // Send any data that was queued up while processing the received data.
   if (ret >= 0 && !is_destroyed()) {
@@ -1089,6 +1107,16 @@ int Http2Session::OnBeginHeadersCallback(nghttp2_session* handle,
   // The common case is that we're creating a new stream. The less likely
   // case is that we're receiving a set of trailers
   if (!stream) [[likely]] {
+    // Close() may be deferred while mem_recv is in progress (see
+    // Http2Session::Close). A 'stream' handler that calls session.destroy()
+    // runs via nextTick from MakeCallback during that window, so later
+    // HEADERS in the same receive buffer must not create a C++ stream
+    // whose JS wrapper (and onread) is never installed.
+    if (session->is_closing()) {
+      nghttp2_submit_rst_stream(
+          session->session(), NGHTTP2_FLAG_NONE, id, NGHTTP2_REFUSED_STREAM);
+      return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    }
     if (!session->CanAddStream() ||
         Http2Stream::New(session, id, frame->headers.cat) == nullptr)
         [[unlikely]] {
@@ -1473,10 +1501,22 @@ int Http2Session::OnDataChunkReceived(nghttp2_session* handle,
     // If the stream owner (e.g. the JS Http2Stream) wants more data, just
     // tell nghttp2 that all data has been consumed. Otherwise, defer until
     // more data is being requested.
-    if (stream->is_reading())
+    if (stream->is_reading()) {
       nghttp2_session_consume_stream(handle, id, avail);
-    else
+    } else {
       stream->inbound_consumed_data_while_paused_ += avail;
+
+      // The Buffer handed to JS may stay alive in the readable queue for as
+      // long as the stream remains paused. Charge it (including a per-chunk
+      // overhead for the Buffer view) against maxSessionMemory so that a peer
+      // cannot make the session retain an unbounded amount of memory by
+      // sending many tiny DATA frames.
+      uint64_t memory =
+          static_cast<uint64_t>(avail) + kHttp2SessionDataChunkOverhead;
+      stream->inbound_consumed_data_while_paused_memory_ += memory;
+      session->inbound_queued_data_memory_ += memory;
+      session->IncrementCurrentSessionMemory(memory);
+    }
 
     // If we have a gathered a lot of data for output, try sending it now.
     if (session->outgoing_length_ > 4096 ||
@@ -1484,15 +1524,6 @@ int Http2Session::OnDataChunkReceived(nghttp2_session* handle,
       session->SendPendingData();
     }
   } while (len != 0);
-
-  // If we are currently waiting for a write operation to finish, we should
-  // tell nghttp2 that we want to wait before we process more input data.
-  if (session->is_write_in_progress()) {
-    CHECK(session->is_reading_stopped());
-    session->set_receive_paused();
-    Debug(session, "receive paused");
-    return NGHTTP2_ERR_PAUSE;
-  }
 
   return 0;
 }
@@ -1576,7 +1607,6 @@ void Http2StreamListener::OnStreamRead(ssize_t nread, const uv_buf_t& buf) {
   size_t offset = buf.base - session->stream_buf_.base;
 
   // Verify that the data offset is inside the current read buffer.
-  CHECK_GE(offset, session->stream_buf_offset_);
   CHECK_LE(offset, session->stream_buf_.len);
   CHECK_LE(offset + buf.len, session->stream_buf_.len);
 
@@ -1609,8 +1639,8 @@ void Http2Session::HandleHeadersFrame(const nghttp2_frame* frame) {
   // this way for performance reasons (it's faster to generate and pass an
   // array than it is to generate and pass the object).
 
-  MaybeStackBuffer<Local<Value>, 64> headers_v(stream->headers_count() * 2);
-  MaybeStackBuffer<Local<Value>, 32> sensitive_v(stream->headers_count());
+  MaybeStackBuffer<Value, 64> headers_v(isolate, stream->headers_count() * 2);
+  MaybeStackBuffer<Value, 32> sensitive_v(isolate, stream->headers_count());
   size_t sensitive_count = 0;
 
   stream->TransferHeaders([&](const Http2Header& header, size_t i) {
@@ -1627,13 +1657,14 @@ void Http2Session::HandleHeadersFrame(const nghttp2_frame* frame) {
   stream->retained_headers_length_ += stream->current_headers_length_;
   stream->current_headers_length_ = 0;
 
+  sensitive_v.SetLength(sensitive_count);
   Local<Value> args[] = {
-    stream->object(),
-    Integer::New(isolate, id),
-    Integer::New(isolate, stream->headers_category()),
-    Integer::New(isolate, frame->hd.flags),
-    Array::New(isolate, headers_v.out(), headers_v.length()),
-    Array::New(isolate, sensitive_v.out(), sensitive_count),
+      stream->object(),
+      Integer::New(isolate, id),
+      Integer::New(isolate, stream->headers_category()),
+      Integer::New(isolate, frame->hd.flags),
+      headers_v.ToArray(),
+      sensitive_v.ToArray(),
   };
   MakeCallback(env()->http2session_on_headers_function(),
                arraysize(args), args);
@@ -1869,8 +1900,15 @@ void Http2Session::OnStreamAfterWrite(WriteWrap* w, int status) {
   CHECK(is_write_in_progress());
   set_write_in_progress(false);
 
+  // ClearOutgoing() may synchronously finish a pending close.
+  const bool close_pending = is_close_pending();
   // Inform all pending writes about their completion.
   ClearOutgoing(status);
+
+  if (close_pending || is_close_pending()) {
+    MaybeFinishPendingClose(status);
+    return;
+  }
 
   if (is_reading_stopped() &&
       !is_write_in_progress() &&
@@ -1888,11 +1926,6 @@ void Http2Session::OnStreamAfterWrite(WriteWrap* w, int status) {
       stream_->ReadStart();
     }
     return;
-  }
-
-  // If there is more incoming data queued up, consume it.
-  if (stream_buf_offset_ > 0) {
-    ConsumeHTTP2Data();
   }
 
   if (!is_write_scheduled() && !is_destroyed()) {
@@ -1941,9 +1974,27 @@ void Http2Session::MaybeStopReading() {
   if (is_reading_stopped() || is_closing()) return;
   int want_read = nghttp2_session_want_read(session_.get());
   Debug(this, "wants read? %d", want_read);
-  if (want_read == 0 || is_write_in_progress()) {
+  // Stop reading if nghttp2 does not want more data, a write is in progress,
+  // or the session is already holding more inbound DATA than its memory budget
+  // allows. The last condition bounds the amount of memory a peer can make the
+  // session retain by sending many small DATA frames on undrained streams.
+  if (want_read == 0 || inbound_queued_data_memory_ >= max_session_memory_) {
     set_reading_stopped();
     stream_->ReadStop();
+  }
+}
+
+void Http2Session::MaybeStartReading() {
+  // Restart reading once the session can make progress: nghttp2 wants more
+  // data, no write is in flight, and the inbound DATA queued while streams
+  // were paused no longer exceeds the session memory budget.
+  if (!is_reading_stopped() || is_closing() || is_destroyed()) return;
+  int want_read = nghttp2_session_want_read(session_.get());
+  Debug(this, "want read? %d", want_read);
+  if (want_read != 0 && !is_write_in_progress() &&
+      inbound_queued_data_memory_ < max_session_memory_) {
+    set_reading_stopped(false);
+    stream_->ReadStart();
   }
 }
 
@@ -1973,7 +2024,7 @@ void Http2Session::ClearOutgoing(int status) {
 
   // Now that we've finished sending queued data, if there are any pending
   // RstStreams we should try sending again and then flush them one by one.
-  if (!pending_rst_streams_.empty()) {
+  if (status == 0 && !pending_rst_streams_.empty()) {
     std::vector<int32_t> current_pending_rst_streams;
     pending_rst_streams_.swap(current_pending_rst_streams);
 
@@ -2095,13 +2146,16 @@ uint8_t Http2Session::SendPendingData() {
     set_write_in_progress(false);
     ClearOutgoing(res.err);
     MaybeNotifyGracefulCloseComplete();
+    MaybeFinishPendingClose(res.err);
   }
 
   MaybeStopReading();
 
-  // If nghttp2 has internally torn down the session (detected in OnFrameSent)
-  // during the nghttp2_session_mem_send loop above, at this point we error:
-  if (internal_goaway_sent_) {
+  // If nghttp2 has internally torn down the session (detected in OnFrameSent,
+  // or because it no longer wants to read or write while we still have open
+  // streams) during the nghttp2_session_mem_send loop above, at this point we
+  // error:
+  if (internal_goaway_sent_ || HasStreamsAbandonedByNghttp2()) {
     internal_goaway_sent_ = false;
     if (!is_closing() && !is_destroyed()) {
       Isolate* isolate = env()->isolate();
@@ -2148,15 +2202,19 @@ int Http2Session::OnSendData(
     if (write.buf.len <= length) {
       // This write does not suffice by itself, so we can consume it completely.
       length -= write.buf.len;
+      write.stream = stream;
       session->PushOutgoingBuffer(std::move(write));
       stream->queue_.pop();
       continue;
     }
 
-    // Slice off `length` bytes of the first write in the queue.
-    session->PushOutgoingBuffer(NgHttp2StreamWrite {
-      uv_buf_init(write.buf.base, length)
-    });
+    // Slice off `length` bytes of the first write in the queue. Retain the
+    // originating request until the slice is no longer used by the socket.
+    session->PushOutgoingBuffer(
+        NgHttp2StreamWrite{nullptr,
+                           write.buffer_owner,
+                           stream,
+                           uv_buf_init(write.buf.base, length)});
     write.buf.base += length;
     write.buf.len -= length;
     break;
@@ -2206,7 +2264,7 @@ void Http2Session::OnStreamRead(ssize_t nread, const uv_buf_t& buf_) {
   Context::Scope context_scope(env()->context());
   Http2Scope h2scope(this);
   CHECK_NOT_NULL(stream_);
-  Debug(this, "receiving %d bytes, offset %d", nread, stream_buf_offset_);
+  Debug(this, "receiving %d bytes", nread);
   std::unique_ptr<BackingStore> bs = env()->release_managed_buffer(buf_);
 
   // Only pass data on if nread > 0
@@ -2221,8 +2279,11 @@ void Http2Session::OnStreamRead(ssize_t nread, const uv_buf_t& buf_) {
 
   statistics_.data_received += nread;
 
-  if (stream_buf_offset_ == 0 && static_cast<size_t>(nread) != bs->ByteLength())
-      [[likely]] {
+  // ConsumeHTTP2Data() always consumes the whole chunk, so there is never a
+  // partially processed buffer left over from a previous read.
+  DCHECK_NULL(stream_buf_.base);
+
+  if (static_cast<size_t>(nread) != bs->ByteLength()) [[likely]] {
     // Shrink to the actual amount of used data.
     std::unique_ptr<BackingStore> old_bs = std::move(bs);
     bs = ArrayBuffer::NewBackingStore(
@@ -2230,31 +2291,6 @@ void Http2Session::OnStreamRead(ssize_t nread, const uv_buf_t& buf_) {
         nread,
         BackingStoreInitializationMode::kUninitialized);
     memcpy(bs->Data(), old_bs->Data(), nread);
-  } else {
-    // This is a very unlikely case, and should only happen if the ReadStart()
-    // call in OnStreamAfterWrite() immediately provides data. If that does
-    // happen, we concatenate the data we received with the already-stored
-    // pending input data, slicing off the already processed part.
-    size_t pending_len = stream_buf_.len - stream_buf_offset_;
-    std::unique_ptr<BackingStore> new_bs = ArrayBuffer::NewBackingStore(
-        env()->isolate(),
-        pending_len + nread,
-        BackingStoreInitializationMode::kUninitialized);
-    memcpy(static_cast<char*>(new_bs->Data()),
-           stream_buf_.base + stream_buf_offset_,
-           pending_len);
-    memcpy(static_cast<char*>(new_bs->Data()) + pending_len,
-           bs->Data(),
-           nread);
-
-    bs = std::move(new_bs);
-    nread = bs->ByteLength();
-    stream_buf_offset_ = 0;
-    stream_buf_ab_.Reset();
-
-    // We have now fully processed the stream_buf_ input chunk (by moving the
-    // remaining part into buf, which will be accounted for below).
-    DecrementCurrentSessionMemory(stream_buf_.len);
   }
 
   IncrementCurrentSessionMemory(nread);
@@ -2276,8 +2312,7 @@ void Http2Session::OnStreamRead(ssize_t nread, const uv_buf_t& buf_) {
 
 bool Http2Session::HasWritesOnSocketForStream(Http2Stream* stream) {
   for (const NgHttp2StreamWrite& wr : outgoing_buffers_) {
-    if (wr.req_wrap && WriteWrap::FromObject(wr.req_wrap)->stream() == stream)
-      return true;
+    if (wr.stream.get() == stream) return true;
   }
   return false;
 }
@@ -2326,6 +2361,7 @@ Http2Stream* Http2Stream::New(Http2Session* session,
   Local<Object> obj;
   if (!session->env()
            ->http2stream_constructor_template()
+           ->InstanceTemplate()
            ->NewInstance(session->env()->context())
            .ToLocal(&obj)) {
     return nullptr;
@@ -2498,6 +2534,8 @@ void Http2Stream::CompleteDestroyCleanup() {
       // Free any remaining outgoing data chunks here. This should be done
       // here because it's possible for destroy to have been called while
       // we still have queued outbound writes.
+      if (session_)
+        DecrementAvailableOutboundLength(available_outbound_length_);
       while (!queue_.empty()) {
         NgHttp2StreamWrite& head = queue_.front();
         if (head.req_wrap)
@@ -2753,6 +2791,21 @@ int Http2Stream::ReadStart() {
       inbound_consumed_data_while_paused_);
   inbound_consumed_data_while_paused_ = 0;
 
+  // The data that was queued while paused is now being consumed by the
+  // application, so release the memory charged against maxSessionMemory.
+  if (inbound_consumed_data_while_paused_memory_ > 0) {
+    session_->DecrementCurrentSessionMemory(
+        inbound_consumed_data_while_paused_memory_);
+    session_->DecrementInboundQueuedDataMemory(
+        inbound_consumed_data_while_paused_memory_);
+    inbound_consumed_data_while_paused_memory_ = 0;
+  }
+
+  // The session may have stopped reading because the memory limit was
+  // reached; now that the application is consuming data, it may be able to
+  // make progress again.
+  session_->MaybeStartReading();
+
   return 0;
 }
 
@@ -2786,14 +2839,16 @@ int Http2Stream::DoWrite(WriteWrap* req_wrap,
     return UV_EOF;
   }
   Debug(this, "queuing %d buffers to send", nbufs);
+  BaseObjectPtr<AsyncWrap> buffer_owner(req_wrap->GetAsyncWrap());
   for (size_t i = 0; i < nbufs; ++i) {
     // Store the req_wrap on the last write info in the queue, so that it is
     // only marked as finished once all buffers associated with it are finished.
-    queue_.emplace(NgHttp2StreamWrite {
-      BaseObjectPtr<AsyncWrap>(
-          i == nbufs - 1 ? req_wrap->GetAsyncWrap() : nullptr),
-      bufs[i]
-    });
+    // Every entry retains the request separately so partial slices remain valid
+    // until the underlying socket write completes.
+    queue_.emplace(NgHttp2StreamWrite{
+        BaseObjectPtr<AsyncWrap>(i == nbufs - 1 ? buffer_owner : nullptr),
+        buffer_owner,
+        bufs[i]});
     IncrementAvailableOutboundLength(bufs[i].len);
   }
   CHECK_NE(nghttp2_session_resume_data(
@@ -2817,9 +2872,11 @@ bool Http2Stream::AddHeader(nghttp2_rcbuf* name,
 
   Http2Header header(env(), name, value, flags);
   size_t length = header.length() + 32;
-  // A header can only be added if we have not exceeded the maximum number
-  // of headers and the session has memory available for it.
-  if (!session_->has_available_session_memory(length) ||
+  // Queued request bodies must not block response headers on local streams.
+  // Push streams have even IDs and retain the full session memory check.
+  const bool exclude_outbound =
+      session_->type() == NGHTTP2_SESSION_CLIENT && (id_ & 1) != 0;
+  if (!session_->has_available_session_memory(length, exclude_outbound) ||
       current_headers_.size() == max_header_pairs_ ||
       current_headers_length_ + length > max_header_length_) {
     return false;
@@ -2873,7 +2930,10 @@ ssize_t Http2Stream::Provider::Stream::OnRead(nghttp2_session* handle,
   Http2Session* session = static_cast<Http2Session*>(user_data);
   Debug(session, "reading outbound data for stream %d", id);
   BaseObjectPtr<Http2Stream> stream = session->FindStream(id);
-  if (!stream) return 0;
+  // The stream was destroyed without nghttp2 being told. Returning 0 here
+  // would make nghttp2 send empty DATA frames forever, so have it reset
+  // the stream instead.
+  if (!stream) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
   if (stream->statistics_.first_byte_sent == 0)
     stream->statistics_.first_byte_sent = uv_hrtime();
   CHECK_EQ(id, stream->id());
@@ -2930,12 +2990,13 @@ ssize_t Http2Stream::Provider::Stream::OnRead(nghttp2_session* handle,
 
 void Http2Stream::IncrementAvailableOutboundLength(size_t amount) {
   available_outbound_length_ += amount;
-  session_->IncrementCurrentSessionMemory(amount);
+  session_->IncrementQueuedOutboundMemory(amount);
 }
 
 void Http2Stream::DecrementAvailableOutboundLength(size_t amount) {
+  DCHECK_LE(amount, available_outbound_length_);
   available_outbound_length_ -= amount;
-  session_->DecrementCurrentSessionMemory(amount);
+  session_->DecrementQueuedOutboundMemory(amount);
 }
 
 
@@ -3103,6 +3164,19 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
   int32_t options;
   if (!args[1]->Int32Value(env->context()).To(&options)) {
     return;
+  }
+
+  // maxSessionMemory is documented to reject new streams while the limit is
+  // exceeded. CanAddStream() enforces that for peer-initiated streams; apply
+  // the same memory check to locally initiated requests so that a session
+  // whose socket is not draining cannot queue frames without bound. Like the
+  // response header check, queued request bodies are not counted, so large
+  // uploads do not prevent unrelated requests on the same session.
+  if (!session->has_available_session_memory(sizeof(Http2Stream),
+                                             /* exclude_outbound */ true))
+      [[unlikely]] {
+    Debug(session, "not submitting request: session memory limit exceeded");
+    return args.GetReturnValue().Set(false);
   }
 
   Debug(session, "request submitted");
@@ -3403,13 +3477,8 @@ void Http2Session::AltSvc(const FunctionCallbackInfo<Value>& args) {
 
   MaybeStackBuffer<uint8_t> origin(origin_len);
   MaybeStackBuffer<uint8_t> value(value_len);
-  origin_str->WriteOneByteV2(env->isolate(),
-                             0,
-                             origin_len,
-                             *origin,
-                             String::WriteFlags::kNullTerminate);
-  value_str->WriteOneByteV2(
-      env->isolate(), 0, value_len, *value, String::WriteFlags::kNullTerminate);
+  origin_str->WriteOneByteV2(env->isolate(), 0, origin_len, *origin);
+  value_str->WriteOneByteV2(env->isolate(), 0, value_len, *value);
 
   session->AltSvc(id, *origin, origin_len, *value, value_len);
 }
@@ -3588,6 +3657,8 @@ void Http2Ping::DetachFromSession() {
 void NgHttp2StreamWrite::MemoryInfo(MemoryTracker* tracker) const {
   if (req_wrap)
     tracker->TrackField("req_wrap", req_wrap);
+  if (buffer_owner) tracker->TrackField("buffer_owner", buffer_owner);
+  if (stream) tracker->TrackField("stream", stream);
   tracker->TrackField("buf", buf);
 }
 
@@ -3676,37 +3747,48 @@ void Initialize(Local<Object> target,
   SetMethod(context, target, "packSettings", PackSettings);
   SetMethod(context, target, "setCallbackFunctions", SetCallbackFunctions);
 
-  Local<FunctionTemplate> ping = FunctionTemplate::New(env->isolate());
-  ping->SetClassName(FIXED_ONE_BYTE_STRING(env->isolate(), "Http2Ping"));
-  ping->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  Local<ObjectTemplate> pingt = ping->InstanceTemplate();
-  pingt->SetInternalFieldCount(Http2Ping::kInternalFieldCount);
-  env->set_http2ping_constructor_template(pingt);
+  if (env->http2ping_constructor_template().IsEmpty()) {
+    Local<FunctionTemplate> ping = FunctionTemplate::New(env->isolate());
+    ping->SetClassName(FIXED_ONE_BYTE_STRING(env->isolate(), "Http2Ping"));
+    ping->Inherit(AsyncWrap::GetConstructorTemplate(env));
+    Local<ObjectTemplate> pingt = ping->InstanceTemplate();
+    pingt->SetInternalFieldCount(Http2Ping::kInternalFieldCount);
+    env->set_http2ping_constructor_template(pingt);
+  }
 
-  Local<FunctionTemplate> setting = FunctionTemplate::New(env->isolate());
-  setting->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  Local<ObjectTemplate> settingt = setting->InstanceTemplate();
-  settingt->SetInternalFieldCount(Http2Settings::kInternalFieldCount);
-  env->set_http2settings_constructor_template(settingt);
+  if (env->http2settings_constructor_template().IsEmpty()) {
+    Local<FunctionTemplate> setting = FunctionTemplate::New(env->isolate());
+    setting->Inherit(AsyncWrap::GetConstructorTemplate(env));
+    Local<ObjectTemplate> settingt = setting->InstanceTemplate();
+    settingt->SetInternalFieldCount(Http2Settings::kInternalFieldCount);
+    env->set_http2settings_constructor_template(settingt);
+  }
 
-  Local<FunctionTemplate> stream = FunctionTemplate::New(env->isolate());
-  SetProtoMethod(isolate, stream, "id", Http2Stream::GetID);
-  SetProtoMethod(isolate, stream, "destroy", Http2Stream::Destroy);
-  SetProtoMethod(isolate, stream, "priority", Http2Stream::Priority);
-  SetProtoMethod(isolate, stream, "pushPromise", Http2Stream::PushPromise);
-  SetProtoMethod(isolate, stream, "info", Http2Stream::Info);
-  SetProtoMethod(isolate, stream, "trailers", Http2Stream::Trailers);
-  SetProtoMethod(
-      isolate, stream, "disableAutoTrailers", Http2Stream::DisableAutoTrailers);
-  SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
-  SetProtoMethod(isolate, stream, "rstStream", Http2Stream::RstStream);
-  SetProtoMethod(isolate, stream, "refreshState", Http2Stream::RefreshState);
-  stream->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  StreamBase::AddMethods(env, stream);
-  Local<ObjectTemplate> streamt = stream->InstanceTemplate();
-  streamt->SetInternalFieldCount(Http2Stream::kInternalFieldCount);
-  env->set_http2stream_constructor_template(streamt);
-  SetConstructorFunction(context, target, "Http2Stream", stream);
+  Local<FunctionTemplate> stream = env->http2stream_constructor_template();
+  if (stream.IsEmpty()) {
+    stream = FunctionTemplate::New(env->isolate());
+    SetProtoMethod(isolate, stream, "id", Http2Stream::GetID);
+    SetProtoMethod(isolate, stream, "destroy", Http2Stream::Destroy);
+    SetProtoMethod(isolate, stream, "priority", Http2Stream::Priority);
+    SetProtoMethod(isolate, stream, "pushPromise", Http2Stream::PushPromise);
+    SetProtoMethod(isolate, stream, "info", Http2Stream::Info);
+    SetProtoMethod(isolate, stream, "trailers", Http2Stream::Trailers);
+    SetProtoMethod(isolate,
+                   stream,
+                   "disableAutoTrailers",
+                   Http2Stream::DisableAutoTrailers);
+    SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
+    SetProtoMethod(isolate, stream, "rstStream", Http2Stream::RstStream);
+    SetProtoMethod(isolate, stream, "refreshState", Http2Stream::RefreshState);
+    stream->Inherit(AsyncWrap::GetConstructorTemplate(env));
+    StreamBase::AddMethods(env, stream);
+    stream->InstanceTemplate()->SetInternalFieldCount(
+        Http2Stream::kInternalFieldCount);
+    stream->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "Http2Stream"));
+    env->set_http2stream_constructor_template(stream);
+  }
+  SetConstructorFunction(
+      context, target, "Http2Stream", stream, SetConstructorFunctionFlag::NONE);
 
   Local<FunctionTemplate> session =
       NewFunctionTemplate(isolate, Http2Session::New);

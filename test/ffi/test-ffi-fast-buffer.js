@@ -1,4 +1,4 @@
-// Flags: --experimental-ffi --expose-internals
+// Flags: --expose-internals --allow-natives-syntax
 'use strict';
 
 const common = require('../common');
@@ -6,6 +6,7 @@ common.skipIfFFIMissing();
 
 const assert = require('node:assert');
 const { test } = require('node:test');
+const { queryObjects } = require('node:v8');
 const { internalBinding } = require('internal/test/binding');
 const {
   kSbSharedBuffer,
@@ -66,6 +67,66 @@ test('fast FFI buffer arguments reject invalid values', () => {
       code: 'ERR_INVALID_ARG_VALUE',
     });
   } finally {
+    lib.close();
+  }
+});
+
+test('optimized pointer arguments reject direct SharedArrayBuffers', () => {
+  const lib = new ffi.DynamicLibrary(libraryPath);
+  const firstByte = lib.getFunction('first_byte', {
+    arguments: ['pointer'],
+    return: 'u8',
+  });
+  const regular = new ArrayBuffer(1);
+  const shared = new SharedArrayBuffer(1);
+  const expected = { code: 'ERR_INVALID_ARG_VALUE' };
+
+  function callFirstByte(value) {
+    return firstByte(value);
+  }
+
+  try {
+    assert.throws(() => callFirstByte(shared), expected);
+
+    eval('%PrepareFunctionForOptimization(callFirstByte)');
+    callFirstByte(regular);
+    callFirstByte(regular);
+    eval('%OptimizeFunctionOnNextCall(callFirstByte)');
+    callFirstByte(regular);
+
+    assert.throws(() => callFirstByte(shared), expected);
+  } finally {
+    eval('%WaitForBackgroundOptimization()');
+    lib.close();
+  }
+});
+
+test('optimized buffer calls do not retain handles', () => {
+  const { lib, functions } = ffi.dlopen(libraryPath, {
+    first_byte: { arguments: ['buffer'], return: 'u8' },
+  });
+  // A leaked handle to the backing store keeps it alive until the current
+  // synchronous run ends, so count live backing stores after the calls.
+  class TrackedArrayBuffer extends ArrayBuffer {}
+
+  function callFirstByte(view) {
+    return functions.first_byte(view);
+  }
+
+  try {
+    const warm = new Uint8Array(1);
+    eval('%PrepareFunctionForOptimization(callFirstByte)');
+    for (let i = 0; i < 1000; i++) callFirstByte(warm);
+    eval('%OptimizeFunctionOnNextCall(callFirstByte)');
+    callFirstByte(warm);
+
+    for (let i = 0; i < 100; i++) {
+      callFirstByte(new Uint8Array(new TrackedArrayBuffer(1)));
+    }
+    assert.strictEqual(
+      queryObjects(TrackedArrayBuffer, { format: 'count' }), 0);
+  } finally {
+    eval('%WaitForBackgroundOptimization()');
     lib.close();
   }
 });
@@ -173,6 +234,7 @@ test('optimized buffer signatures preserve pointer-like conversions', () => {
       }
     }
   } finally {
+    eval('%WaitForBackgroundOptimization()');
     lib.close();
   }
 });
@@ -206,6 +268,7 @@ test('multi-argument buffer signatures accept pointer BigInts', () => {
       assert.strictEqual(functions.sum_buffer(pointer, length), 28n);
     }
   } finally {
+    eval('%WaitForBackgroundOptimization()');
     lib.close();
   }
 });

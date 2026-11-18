@@ -115,6 +115,31 @@ TEST_F(RegisterAllocatorTest, CanAllocateThreeRegisters) {
   Allocate();
 }
 
+TEST_F(RegisterAllocatorTest, CombineFPAliasingSimd128InactiveDouble) {
+  if (kFPAliasing != AliasingKind::kCombine) return;
+  // Four double registers give two Simd128 registers under combine aliasing;
+  // the second Simd128 register aliases the two upper double registers.
+  SetNumRegs(4, 4);
+
+  StartBlock();
+  // Occupy the first Simd128 register for the whole block.
+  auto blocker = Define(FPReg(0, kSimd128));
+  // The Simd128 value below has to share resources with the fixed double
+  // definition that follows, since that double aliases the only remaining
+  // Simd128 register.
+  auto simd = EmitOI(FPReg(kNoValue, kSimd128));
+  EmitOI(FPReg(2, kFloat64));
+  Instruction* use = EmitI(Reg(simd));
+  EmitI(Reg(blocker, 0));
+  EndBlock(Last());
+
+  Allocate();
+
+  AllocatedOperand d2(LocationOperand::REGISTER, kFloat64, 2);
+  EXPECT_TRUE(use->InputAt(0)->IsAnyLocationOperand());
+  EXPECT_FALSE(use->InputAt(0)->InterferesWith(d2));
+}
+
 TEST_F(RegisterAllocatorTest, CanAllocateFPRegisters) {
   StartBlock();
   TestOperand inputs[] = {
@@ -787,6 +812,48 @@ INSTANTIATE_TEST_SUITE_P(
     RegisterAllocatorTest, SlotConstraintTest,
     ::testing::Combine(::testing::ValuesIn(kParameterTypes),
                        ::testing::Range(0, SlotConstraintTest::kMaxVariant)));
+
+TEST_F(RegisterAllocatorTest, AllocateBlockedRegDeferredClampBelowStart) {
+  SetNumRegs(3, 1);
+
+  // B0 (non-deferred): branch selector `c`, value `d` used at the deferred
+  // jump, and phi inputs `w0..w2` creating register pressure.
+  StartBlock();
+  VReg c = Parameter(Reg());
+  VReg d = Define(Reg());
+  VReg w0 = Define(Reg());
+  VReg w1 = Define(Reg());
+  VReg w2 = Define(Reg());
+  EndBlock(Branch(Reg(c), 1, 2));  // succs: B1 (deferred), B2
+
+  // B1 (deferred): a call clobbers all registers, defs re-occupy all
+  // registers, ending with a jump that uses `d` in a register. The next block
+  // in RPO order (B2) is not deferred.
+  StartBlock(true);
+  EmitCall(Slot(-1));
+  VReg z0 = Define(Reg());
+  VReg z1 = Define(Reg());
+  VReg z2 = Define(Reg());
+  EndBlock(Jump(2, Reg(d)));  // succ: B3
+
+  // B2 (non-deferred; predecessor B0).
+  StartBlock();
+  EmitNop();
+  EndBlock(Jump(1));  // succ: B3
+
+  // B3: merge with phis keeping `z0..z2` live out of B1, and a late use of `d`
+  // so that its split child survives past the B2 block boundary.
+  StartBlock();
+  VReg p0 = Phi(z0, w0);
+  VReg p1 = Phi(z1, w1);
+  VReg p2 = Phi(z2, w2);
+  EmitI(Use(d));
+  EmitI(Use(p0), Use(p1), Use(p2));
+  Return(p0);
+  EndBlock(Last());
+
+  Allocate();
+}
 
 }  // namespace
 }  // namespace compiler

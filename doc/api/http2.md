@@ -669,9 +669,15 @@ added:
 
 * `windowSize` {number}
 
-Sets the local endpoint's window size.
+Sets the local endpoint's connection-level window size.
 The `windowSize` is the total window size to set, not
 the delta.
+
+Increases take effect immediately, but decreases only apply as the window
+already advertised to the peer is consumed, since a window that has been
+advertised cannot be retracted. To use a window smaller than the default from
+the start of the connection, set the `connectionWindowSize` option when
+creating the server or client session instead.
 
 ```mjs
 import { createServer } from 'node:http2';
@@ -723,7 +729,9 @@ registered as a listener on the `'timeout'` event.
 <!-- YAML
 added: v8.4.0
 changes:
-  - version: v26.6.0
+  - version:
+     - v26.6.0
+     - v24.20.0
     pr-url: https://github.com/nodejs/node/pull/64427
     description: Calling `destroy` no longer throws and instead destroys the
                  `Http2Session`.
@@ -1273,10 +1281,7 @@ destroyed.
 
 <!-- YAML
 added: v8.4.0
-changes:
-  - version: REPLACEME
-    pr-url: https://github.com/nodejs/node/pull/63249
-    description: Documentation-only deprecation.
+deprecated: v27.0.0-alpha.0.0.0
 -->
 
 > Stability: 0 - Deprecated. Use `'close'` and `'error'` plus
@@ -1303,7 +1308,7 @@ the `http2stream.rstCode` property.
 <!-- YAML
 added: v8.4.0
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63249
     description: >-
       Also emitted on peer-initiated resets that arrive before
@@ -1397,9 +1402,12 @@ option must be set for this event to be emitted.
 
 <!-- YAML
 added: v8.4.0
+deprecated: v27.0.0-alpha.0.0.0
 -->
 
 * Type: {boolean}
+
+> Stability: 0 - Deprecated
 
 `true` if the `Http2Stream` was closed while the writable side was
 still open. When set, the `'aborted'` event was emitted.
@@ -1751,7 +1759,7 @@ stream.on('push', (headers, flags) => {
 <!-- YAML
 added: v8.4.0
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63249
     description: >-
       If no `'response'` listener is attached when the response headers
@@ -2842,6 +2850,9 @@ Throws `ERR_INVALID_ARG_TYPE` for invalid `settings` argument.
 <!-- YAML
 added: v8.4.0
 changes:
+  - version: v26.11.0
+    pr-url: https://github.com/nodejs/node/pull/65619
+    description: Added the `connectionWindowSize` option.
   - version:
      - v25.7.0
      - v24.15.0
@@ -2917,9 +2928,12 @@ changes:
     limit to be exceeded, but new `Http2Stream` instances will be rejected
     while this limit is exceeded. The current number of `Http2Stream` sessions,
     the current memory use of the header compression tables, header blocks
-    retained by open streams, current data queued to be sent, and
-    unacknowledged `PING` and `SETTINGS` frames are all counted towards the
-    current limit. **Default:** `10`.
+    retained by open streams, current data queued to be sent, inbound DATA
+    frames retained by undrained streams, and unacknowledged `PING` and
+    `SETTINGS` frames are all counted towards the current limit. When the limit
+    is exceeded the session stops reading from the socket (applying
+    backpressure) until the application consumes the queued data. **Default:**
+    `10`.
   * `maxHeaderListPairs` {number} Sets the maximum number of header entries.
     This is similar to [`server.maxHeadersCount`][] or
     [`request.maxHeadersCount`][] in the `node:http` module. The minimum value
@@ -2959,6 +2973,13 @@ changes:
     error that should tell the peer to not open any more streams, continuing
     to open streams is therefore regarded as a sign of a misbehaving peer.
     **Default:** `100`.
+  * `connectionWindowSize` {number} Sets the initial flow control window for
+    each session, in bytes. This is the total amount of data the remote peer
+    may send across all streams before it has to wait for a `WINDOW_UPDATE`.
+    The equivalent per-stream limit is `settings.initialWindowSize`. The
+    minimum allowed value is `1` and the maximum is 2<sup>31</sup>-1. Values
+    below 65535 will not take effect until the initial protocol-default
+    window of 65535 has been used.
   * `settings` {HTTP/2 Settings Object} The initial settings to send to the
     remote peer upon connection.
   * `streamResetBurst` {number} and `streamResetRate` {number} Sets the rate
@@ -3070,6 +3091,9 @@ server.listen(8000);
 <!-- YAML
 added: v8.4.0
 changes:
+  - version: v26.11.0
+    pr-url: https://github.com/nodejs/node/pull/65619
+    description: Added the `connectionWindowSize` option.
   - version:
      - v25.7.0
      - v24.15.0
@@ -3139,9 +3163,12 @@ changes:
     limit to be exceeded, but new `Http2Stream` instances will be rejected
     while this limit is exceeded. The current number of `Http2Stream` sessions,
     the current memory use of the header compression tables, header blocks
-    retained by open streams, current data queued to be sent, and
-    unacknowledged `PING` and `SETTINGS` frames are all counted towards the
-    current limit. **Default:** `10`.
+    retained by open streams, current data queued to be sent, inbound DATA
+    frames retained by undrained streams, and unacknowledged `PING`
+    and `SETTINGS` frames are all counted towards the current limit. When the
+    limit is exceeded the session stops reading from the socket (applying
+    backpressure) until the application consumes the queued data. **Default:**
+    `10`.
   * `maxHeaderListPairs` {number} Sets the maximum number of header entries.
     This is similar to [`server.maxHeadersCount`][] or
     [`request.maxHeadersCount`][] in the `node:http` module. The minimum value
@@ -3178,6 +3205,14 @@ changes:
     error that should tell the peer to not open any more streams, continuing
     to open streams is therefore regarded as a sign of a misbehaving peer.
     **Default:** `100`.
+  * `connectionWindowSize` {number} Sets the initial flow control window for
+    each session, in bytes. This is the total amount of data the remote peer
+    may send across all streams before it has to wait for a `WINDOW_UPDATE`.
+    The equivalent per-stream limit is `settings.initialWindowSize`. The
+    minimum allowed value is `1` and the maximum is 2<sup>31</sup>-1. Values
+    below 65535 will not take effect until the initial protocol-default
+    window of 65535 has been used.
+    **Default:** `33554432`.
   * `settings` {HTTP/2 Settings Object} The initial settings to send to the
     remote peer upon connection.
   * `streamResetBurst` {number} and `streamResetRate` {number} Sets the rate
@@ -3274,6 +3309,9 @@ server.listen(8443);
 <!-- YAML
 added: v8.4.0
 changes:
+  - version: v26.11.0
+    pr-url: https://github.com/nodejs/node/pull/65619
+    description: Added the `connectionWindowSize` option.
   - version:
       - v15.10.0
       - v14.16.0
@@ -3320,9 +3358,16 @@ changes:
     limit to be exceeded, but new `Http2Stream` instances will be rejected
     while this limit is exceeded. The current number of `Http2Stream` sessions,
     the current memory use of the header compression tables, header blocks
-    retained by open streams, current data queued to be sent, and
+    retained by open streams, current data queued to be sent, inbound DATA
+    frames retained by undrained streams, and
     unacknowledged `PING` and `SETTINGS` frames are all counted towards the
-    current limit. **Default:** `10`.
+    current limit. When the limit is exceeded the session stops reading from the
+    socket (applying backpressure) until the application consumes the queued data.
+    For received headers on locally initiated streams, including
+    informational responses and trailers, queued outbound data across the session
+    is excluded from the memory check. Retained headers still count towards the
+    limit. This exception does not apply to server push streams.
+    **Default:** `10`.
   * `maxHeaderListPairs` {number} Sets the maximum number of header entries.
     This is similar to [`server.maxHeadersCount`][] or
     [`request.maxHeadersCount`][] in the `node:http` module. The minimum value
@@ -3361,6 +3406,14 @@ changes:
   * `protocol` {string} The protocol to connect with, if not set in the
     `authority`. Value may be either `'http:'` or `'https:'`. **Default:**
     `'https:'`
+  * `connectionWindowSize` {number} Sets the initial flow control window for
+    this session, in bytes. This is the total amount of data the remote peer
+    may send across all streams before it has to wait for a `WINDOW_UPDATE`.
+    The equivalent per-stream limit is `settings.initialWindowSize`. The
+    minimum allowed value is `1` and the maximum is 2<sup>31</sup>-1. Values
+    below 65535 will not take effect until the initial protocol-default
+    window of 65535 has been used.
+    **Default:** `33554432`.
   * `settings` {HTTP/2 Settings Object} The initial settings to send to the
     remote peer upon connection.
   * `remoteCustomSettings` {Array} The array of integer values determines the
@@ -3678,7 +3731,7 @@ For incoming headers:
 * The `:status` header is converted to `number`.
 * Duplicates of `:status`, `:method`, `:authority`, `:scheme`, `:path`,
   `:protocol`, `age`, `authorization`, `access-control-allow-credentials`,
-  `access-control-max-age`, `access-control-request-method`, `content-encoding`,
+  `access-control-max-age`, `access-control-request-method`,
   `content-language`, `content-length`, `content-location`, `content-md5`,
   `content-range`, `content-type`, `date`, `dnt`, `etag`, `expires`, `from`,
   `host`, `if-match`, `if-modified-since`, `if-none-match`, `if-range`,
@@ -3793,6 +3846,9 @@ properties.
 * `initialWindowSize` {number} Specifies the _sender's_ initial window size in
   bytes for stream-level flow control. The minimum allowed value is 0. The
   maximum allowed value is 2<sup>32</sup>-1. **Default:** `4194304`.
+  This is a per-stream limit; the window for the connection as a whole is
+  configured separately with the `connectionWindowSize` option of
+  [`http2.createServer()`][] or [`http2.connect()`][].
 * `maxFrameSize` {number} Specifies the size in bytes of the largest frame
   payload. The minimum allowed value is 16,384. The maximum allowed value is
   2<sup>24</sup>-1. **Default:** `16384`.
@@ -4218,7 +4274,10 @@ data.
 
 <!-- YAML
 added: v8.4.0
+deprecated: v27.0.0-alpha.0.0.0
 -->
+
+> Stability: 0 - Deprecated
 
 The `'aborted'` event is emitted whenever a `Http2ServerRequest` instance
 is closed while the underlying writable side is still open.
@@ -4236,9 +4295,12 @@ Just like `'end'`, this event occurs only once per response.
 
 <!-- YAML
 added: v10.1.0
+deprecated: v27.0.0-alpha.0.0.0
 -->
 
 * Type: {boolean}
+
+> Stability: 0 - Deprecated
 
 The `request.aborted` property will be `true` if the request has
 been aborted.
@@ -5250,6 +5312,7 @@ you need to implement any fall-back behavior yourself.
 [`http.createServer()`]: http.md#httpcreateserveroptions-requestlistener
 [`http2.SecureServer`]: #class-http2secureserver
 [`http2.Server`]: #class-http2server
+[`http2.connect()`]: #http2connectauthority-options-listener
 [`http2.createSecureServer()`]: #http2createsecureserveroptions-onrequesthandler
 [`http2.createServer()`]: #http2createserveroptions-onrequesthandler
 [`http2stream.pushStream()`]: #http2streampushstreamheaders-options-callback

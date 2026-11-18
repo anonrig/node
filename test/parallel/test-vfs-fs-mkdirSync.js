@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.mkdirSync dispatches to VFS, including the `recursive: true` form.
@@ -9,10 +9,9 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-mkdirSync-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src', { recursive: true });
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 // Plain mkdir
 fs.mkdirSync(path.join(mountPoint, 'src/d1'));

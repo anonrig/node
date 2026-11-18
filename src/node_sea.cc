@@ -8,6 +8,7 @@
 #include "node_external_reference.h"
 #include "node_internals.h"
 #include "node_options.h"
+#include "node_realm-inl.h"
 #include "node_snapshot_builder.h"
 #include "node_union_bytes.h"
 #include "node_v8_platform-inl.h"
@@ -43,6 +44,16 @@ using v8::Value;
 
 namespace node {
 namespace sea {
+
+// The reserved asset key under which the ZIP archive named by "vfsArchive"
+// is stored. Must match the name used by lib/internal/vfs/sea.js.
+constexpr std::string_view kVfsArchiveAssetName = "node:sea:vfs.zip";
+// The prefix of the reserved asset keys holding the compile cache of the
+// modules in the virtual file system, one asset per module named by its
+// compile cache key. Must match the prefix skipped by
+// lib/internal/vfs/providers/sea.js.
+constexpr std::string_view kVfsCompileCacheAssetPrefix =
+    "node:sea:compile-cache/";
 
 namespace {
 
@@ -246,7 +257,15 @@ bool SeaResource::use_code_cache() const {
   return static_cast<bool>(flags & SeaFlags::kUseCodeCache);
 }
 
-SeaResource FindSingleExecutableResource() {
+bool SeaResource::use_vfs() const {
+  return static_cast<bool>(flags & SeaFlags::kEnableVfs);
+}
+
+bool SeaResource::use_vfs_archive() const {
+  return static_cast<bool>(flags & SeaFlags::kVfsArchive);
+}
+
+const SeaResource& FindSingleExecutableResource() {
   static const SeaResource sea_resource = []() -> SeaResource {
     std::string_view blob = FindSingleExecutableBlob();
     per_process::Debug(DebugCategory::SEA,
@@ -263,6 +282,20 @@ void IsSea(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(IsSingleExecutable());
 }
 
+void IsVfsEnabled(const FunctionCallbackInfo<Value>& args) {
+  bool enabled = false;
+  if (IsSingleExecutable()) {
+    const SeaResource& sea_resource = FindSingleExecutableResource();
+    enabled = static_cast<bool>(sea_resource.flags & SeaFlags::kEnableVfs);
+  }
+  args.GetReturnValue().Set(enabled);
+}
+
+void IsVfsArchiveEnabled(const FunctionCallbackInfo<Value>& args) {
+  args.GetReturnValue().Set(IsSingleExecutable() &&
+                            FindSingleExecutableResource().use_vfs_archive());
+}
+
 void IsExperimentalSeaWarningNeeded(const FunctionCallbackInfo<Value>& args) {
   bool is_building_sea =
       !per_process::cli_options->experimental_sea_config.empty();
@@ -276,7 +309,7 @@ void IsExperimentalSeaWarningNeeded(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  SeaResource sea_resource = FindSingleExecutableResource();
+  const SeaResource& sea_resource = FindSingleExecutableResource();
   args.GetReturnValue().Set(!static_cast<bool>(
       sea_resource.flags & SeaFlags::kDisableExperimentalSeaWarning));
 }
@@ -291,7 +324,7 @@ std::tuple<int, char**> FixupArgsForSEA(int argc,
     static std::vector<std::string> exec_argv_storage;
     static std::vector<std::string> cli_extension_args;
 
-    SeaResource sea_resource = FindSingleExecutableResource();
+    const SeaResource& sea_resource = FindSingleExecutableResource();
 
     new_argv.clear();
     exec_argv_storage.clear();
@@ -447,6 +480,26 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
       if (use_code_cache_value) {
         result.flags |= SeaFlags::kUseCodeCache;
       }
+    } else if (key == "useVfs") {
+      bool use_vfs;
+      if (field.value().get_bool().get(use_vfs)) {
+        FPrintF(
+            stderr, "\"useVfs\" field of %s is not a Boolean\n", config_path);
+        return std::nullopt;
+      }
+      if (use_vfs) {
+        result.flags |= SeaFlags::kEnableVfs;
+      }
+    } else if (key == "vfsArchive") {
+      std::string_view archive_path;
+      if (field.value().get_string().get(archive_path)) {
+        FPrintF(stderr,
+                "\"vfsArchive\" field of %s is not a string\n",
+                config_path);
+        return std::nullopt;
+      }
+      result.vfs_archive_path = archive_path;
+      result.flags |= SeaFlags::kVfsArchive;
     } else if (key == "assets") {
       simdjson::ondemand::object assets_object;
       if (field.value().get_object().get(assets_object)) {
@@ -565,6 +618,45 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
     return std::nullopt;
   }
 
+  if (static_cast<bool>(result.flags & SeaFlags::kEnableVfs)) {
+    if (static_cast<bool>(result.flags & SeaFlags::kUseSnapshot)) {
+      FPrintF(stderr,
+              "\"useVfs\" is not supported when \"useSnapshot\" is true\n");
+      return std::nullopt;
+    }
+  }
+
+  // A SEA rejects --vfs-load at startup (see EnvironmentOptions::CheckOptions),
+  // so do not build one that passes it in "execArgv".
+  for (const std::string& arg : result.exec_argv) {
+    if (arg == "--vfs-load" || arg.starts_with("--vfs-load=")) {
+      FPrintF(stderr,
+              "--vfs-load cannot be used in \"execArgv\" of a single "
+              "executable application\n");
+      return std::nullopt;
+    }
+  }
+
+  if (static_cast<bool>(result.flags & SeaFlags::kVfsArchive)) {
+    if (!static_cast<bool>(result.flags & SeaFlags::kEnableVfs)) {
+      FPrintF(stderr, "\"vfsArchive\" requires \"useVfs\" to be true\n");
+      return std::nullopt;
+    }
+    if (!result.assets.empty()) {
+      FPrintF(stderr,
+              "\"vfsArchive\" cannot be used together with \"assets\"\n");
+      return std::nullopt;
+    }
+    if (result.vfs_archive_path.empty()) {
+      FPrintF(stderr,
+              "\"vfsArchive\" field of %s is not a non-empty string\n",
+              config_path);
+      return std::nullopt;
+    }
+    // The archive is embedded as a single reserved asset.
+    result.flags |= SeaFlags::kIncludeAssets;
+  }
+
   if (result.main_path.empty()) {
     FPrintF(stderr,
             "\"main\" field of %s is not a non-empty string\n",
@@ -677,12 +769,6 @@ std::optional<std::string> GenerateCodeCache(std::string_view main_path,
     Local<UnboundModuleScript> unbound = module->GetUnboundModuleScript();
     cache.reset(ScriptCompiler::CreateCodeCache(unbound));
   } else {
-    // TODO(RaisinTen): Using the V8 code cache prevents us from using
-    // `import()` in the SEA code. Support it. Refs:
-    // https://github.com/nodejs/node/pull/48191#discussion_r1213271430
-    // TODO(joyeecheung): this likely has been fixed by
-    // https://chromium-review.googlesource.com/c/v8/v8/+/5401780 - add a test
-    // and update docs.
     LocalVector<String> parameters(
         isolate,
         {
@@ -712,6 +798,127 @@ std::optional<std::string> GenerateCodeCache(std::string_view main_path,
   }
   std::string code_cache(cache->data, cache->data + cache->length);
   return code_cache;
+}
+
+// Compiles every module in the virtual file system of the single executable
+// application and collects their compile cache, to be embedded as the assets
+// under kVfsCompileCacheAssetPrefix. The modules are compiled by a Node.js
+// instance that mounts the assets the way the executable does at startup
+// (see lib/internal/vfs/sea_compile_cache.js), so the cache is keyed and
+// hashed exactly as the module loaders look it up from the mount.
+ExitCode GenerateVfsCompileCache(
+    const SeaConfig& config,
+    const std::vector<std::string>& args,
+    const std::vector<std::string>& exec_args,
+    std::string_view main_script,
+    std::unordered_map<std::string, std::string>* assets) {
+  std::vector<std::string> errors;
+  std::vector<std::string> env_args = {args[0]};
+  std::unique_ptr<CommonEnvironmentSetup> setup =
+      CommonEnvironmentSetup::Create(
+          per_process::v8_platform.Platform(), &errors, env_args, exec_args);
+  if (!setup) {
+    for (const std::string& err : errors) {
+      FPrintF(stderr, "%s: %s\n", args[0], err);
+    }
+    return ExitCode::kBootstrapFailure;
+  }
+
+  Isolate* isolate = setup->isolate();
+  v8::Locker locker(isolate);
+  Isolate::Scope isolate_scope(isolate);
+  HandleScope handle_scope(isolate);
+  Local<Context> context = setup->context();
+  Context::Scope context_scope(context);
+  Environment* env = setup->env();
+
+  // The cache is collected from this instance, which must neither read nor
+  // write the compile cache the build process itself may be configured with.
+  env->set_env_vars(env->env_vars()->Clone(isolate));
+  for (const char* name : {"NODE_COMPILE_CACHE",
+                           "NODE_COMPILE_CACHE_PORTABLE",
+                           "NODE_COMPILE_CACHE_READONLY",
+                           "NODE_DISABLE_COMPILE_CACHE"}) {
+    env->env_vars()->Delete(isolate, OneByteString(isolate, name));
+  }
+
+  errors::PrinterTryCatch bootstrapCatch(
+      isolate, errors::PrinterTryCatch::kPrintSourceLine);
+
+  Local<Object> options = Object::New(isolate);
+  auto set_option = [&](const char* key, auto&& value) {
+    Local<Value> v8_value;
+    return ToV8Value(context, value).ToLocal(&v8_value) &&
+           options->Set(context, OneByteString(isolate, key), v8_value)
+               .IsJust();
+  };
+  if (!set_option("main", config.main_path) ||
+      !set_option("mainSource", main_script)) {
+    return ExitCode::kGenericUserError;
+  }
+  if (static_cast<bool>(config.flags & SeaFlags::kVfsArchive)) {
+    if (!set_option("vfsArchive", config.vfs_archive_path)) {
+      return ExitCode::kGenericUserError;
+    }
+  } else {
+    std::vector<std::string> asset_keys;
+    std::vector<std::string> asset_paths;
+    for (auto const& [key, path] : config.assets) {
+      asset_keys.push_back(key);
+      asset_paths.push_back(path);
+    }
+    if (!set_option("assetKeys", asset_keys) ||
+        !set_option("assetPaths", asset_paths)) {
+      return ExitCode::kGenericUserError;
+    }
+  }
+
+  Local<Value> compiled;
+  bool loaded =
+      LoadEnvironment(
+          env,
+          [&](const StartExecutionCallbackInfo& info) -> MaybeLocal<Value> {
+            Local<Value> id = FIXED_ONE_BYTE_STRING(
+                isolate, "internal/vfs/sea_compile_cache");
+            Local<Value> builder;
+            if (!env->principal_realm()
+                     ->builtin_module_require()
+                     ->Call(context, Undefined(isolate), 1, &id)
+                     .ToLocal(&builder)) {
+              return MaybeLocal<Value>();
+            }
+            Local<Value> fn;
+            if (!builder.As<Object>()
+                     ->Get(
+                         context,
+                         FIXED_ONE_BYTE_STRING(isolate, "buildSeaCompileCache"))
+                     .ToLocal(&fn)) {
+              return MaybeLocal<Value>();
+            }
+            Local<Value> argv[] = {options};
+            return fn.As<Function>()->Call(
+                context, Undefined(isolate), arraysize(argv), argv);
+          })
+          .ToLocal(&compiled);
+  if (!loaded) {
+    FPrintF(stderr,
+            "Cannot generate the compile cache of the virtual file system\n");
+    return ExitCode::kGenericUserError;
+  }
+
+  CHECK(env->use_compile_cache());
+  size_t entries = 0;
+  for (auto& [name, data] : env->compile_cache_handler()->SerializeEntries()) {
+    assets->emplace(std::string(kVfsCompileCacheAssetPrefix) + name,
+                    std::string(data.begin(), data.end()));
+    entries++;
+  }
+  per_process::Debug(DebugCategory::SEA,
+                     "Generated %zu compile cache entries for %d modules in "
+                     "the virtual file system\n",
+                     entries,
+                     compiled.As<v8::Int32>()->Value());
+  return ExitCode::kNoFailure;
 }
 
 int BuildAssets(const std::unordered_map<std::string, std::string>& config,
@@ -776,6 +983,38 @@ ExitCode GenerateSingleExecutableBlob(
   if (!config.assets.empty() && BuildAssets(config.assets, &assets) != 0) {
     return ExitCode::kGenericUserError;
   }
+  if (static_cast<bool>(config.flags & SeaFlags::kVfsArchive)) {
+    std::string archive;
+    int r = ReadFileSync(&archive, config.vfs_archive_path.c_str());
+    if (r != 0) {
+      const char* err = uv_strerror(r);
+      FPrintF(stderr,
+              "Cannot read vfsArchive %s: %s\n",
+              config.vfs_archive_path,
+              err);
+      return ExitCode::kGenericUserError;
+    }
+    // Only a signature sanity check; the archive is parsed by the ZIP
+    // support in JS when the executable starts.
+    if (archive.size() < 4 || archive[0] != 'P' || archive[1] != 'K') {
+      FPrintF(stderr,
+              "vfsArchive %s is not a ZIP archive\n",
+              config.vfs_archive_path);
+      return ExitCode::kGenericUserError;
+    }
+    assets.emplace(std::string(kVfsArchiveAssetName), std::move(archive));
+  }
+  SeaFlags flags = config.flags;
+  if (static_cast<bool>(flags & SeaFlags::kEnableVfs) &&
+      static_cast<bool>(flags & SeaFlags::kUseCodeCache)) {
+    ExitCode exit_code =
+        GenerateVfsCompileCache(config, args, exec_args, main_script, &assets);
+    if (exit_code != ExitCode::kNoFailure) {
+      return exit_code;
+    }
+    // The cache is embedded as assets even when the configuration has none.
+    flags |= SeaFlags::kIncludeAssets;
+  }
   std::unordered_map<std::string_view, std::string_view> assets_view;
   for (auto const& [key, content] : assets) {
     assets_view.emplace(key, content);
@@ -785,7 +1024,7 @@ ExitCode GenerateSingleExecutableBlob(
     exec_argv_view.emplace_back(arg);
   }
   SeaResource sea{
-      config.flags,
+      flags,
       config.exec_argv_extension,
       config.main_path,
       builds_snapshot_from_main
@@ -836,7 +1075,7 @@ void GetAsset(const FunctionCallbackInfo<Value>& args) {
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsString());
   Utf8Value key(args.GetIsolate(), args[0]);
-  SeaResource sea_resource = FindSingleExecutableResource();
+  const SeaResource& sea_resource = FindSingleExecutableResource();
   if (sea_resource.assets.empty()) {
     return;
   }
@@ -846,11 +1085,13 @@ void GetAsset(const FunctionCallbackInfo<Value>& args) {
   }
   // We cast away the constness here, the JS land should ensure that
   // the data is not mutated.
-  std::unique_ptr<v8::BackingStore> store = ArrayBuffer::NewBackingStore(
+  std::unique_ptr<v8::BackingStore> store = AdoptIntoBackingStore(
+      args.GetIsolate(),
       const_cast<char*>(it->second.data()),
       it->second.size(),
       [](void*, size_t, void*) {},
       nullptr);
+  CHECK(store);
   Local<ArrayBuffer> ab = ArrayBuffer::New(args.GetIsolate(), std::move(store));
   args.GetReturnValue().Set(ab);
 }
@@ -858,7 +1099,7 @@ void GetAsset(const FunctionCallbackInfo<Value>& args) {
 void GetAssetKeys(const FunctionCallbackInfo<Value>& args) {
   CHECK_EQ(args.Length(), 0);
   Isolate* isolate = args.GetIsolate();
-  SeaResource sea_resource = FindSingleExecutableResource();
+  const SeaResource& sea_resource = FindSingleExecutableResource();
 
   Local<Context> context = isolate->GetCurrentContext();
   LocalVector<Value> keys(isolate);
@@ -874,13 +1115,27 @@ void GetAssetKeys(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(result);
 }
 
+// A worker has no main script handed to it, but places the SEA main script in
+// its virtual file system just as the main thread does.
+void GetMainCode(const FunctionCallbackInfo<Value>& args) {
+  CHECK_EQ(args.Length(), 0);
+  const SeaResource& sea_resource = FindSingleExecutableResource();
+  CHECK(!sea_resource.use_snapshot());
+  Local<Value> code;
+  if (ToV8Value(args.GetIsolate()->GetCurrentContext(),
+                sea_resource.main_code_or_snapshot)
+          .ToLocal(&code)) {
+    args.GetReturnValue().Set(code);
+  }
+}
+
 MaybeLocal<Value> LoadSingleExecutableApplication(
     const StartExecutionCallbackInfoWithModule& info) {
   // Here we are currently relying on the fact that in NodeMainInstance::Run(),
   // env->context() is entered.
   Environment* env = info.env();
   Local<Context> context = env->context();
-  SeaResource sea = FindSingleExecutableResource();
+  const SeaResource& sea = FindSingleExecutableResource();
 
   CHECK(!sea.use_snapshot());
   // TODO(joyeecheung): this should be an external string. Refactor UnionBytes
@@ -902,7 +1157,7 @@ bool MaybeLoadSingleExecutableApplication(Environment* env) {
     return false;
   }
 
-  SeaResource sea = FindSingleExecutableResource();
+  const SeaResource& sea = FindSingleExecutableResource();
 
   if (sea.use_snapshot()) {
     // The SEA preparation blob building process should already enforce this,
@@ -924,20 +1179,49 @@ void Initialize(Local<Object> target,
                 Local<Value> unused,
                 Local<Context> context,
                 void* priv) {
+  Environment* env = Environment::GetCurrent(context);
+  Isolate* isolate = env->isolate();
+
+  if (IsSingleExecutable()) {
+    const SeaResource& sea_resource = FindSingleExecutableResource();
+    // Expose the main script path recorded in the SEA config so the VFS
+    // integration can place the main script at the mount point root.
+    if (static_cast<bool>(sea_resource.flags & SeaFlags::kEnableVfs)) {
+      Local<String> code_path_str;
+      if (String::NewFromUtf8(isolate,
+                              sea_resource.code_path.data(),
+                              NewStringType::kNormal,
+                              sea_resource.code_path.length())
+              .ToLocal(&code_path_str)) {
+        target
+            ->Set(context,
+                  FIXED_ONE_BYTE_STRING(isolate, "mainCodePath"),
+                  code_path_str)
+            .Check();
+      }
+    }
+  }
+
   SetMethod(context, target, "isSea", IsSea);
+  SetMethod(context, target, "isVfsEnabled", IsVfsEnabled);
+  SetMethod(context, target, "isVfsArchiveEnabled", IsVfsArchiveEnabled);
   SetMethod(context,
             target,
             "isExperimentalSeaWarningNeeded",
             IsExperimentalSeaWarningNeeded);
   SetMethod(context, target, "getAsset", GetAsset);
   SetMethod(context, target, "getAssetKeys", GetAssetKeys);
+  SetMethod(context, target, "getMainCode", GetMainCode);
 }
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(IsSea);
+  registry->Register(IsVfsEnabled);
+  registry->Register(IsVfsArchiveEnabled);
   registry->Register(IsExperimentalSeaWarningNeeded);
   registry->Register(GetAsset);
   registry->Register(GetAssetKeys);
+  registry->Register(GetMainCode);
 }
 
 }  // namespace sea

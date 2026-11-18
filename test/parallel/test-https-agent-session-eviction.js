@@ -8,7 +8,7 @@ if (!common.hasCrypto) {
 }
 
 const fixtures = require('../common/fixtures');
-const { hasOpenSSL, hasFIPS } = require('../common/crypto');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
 
 const https = require('https');
 const { constants: { SSL_OP_NO_TICKET } } = require('crypto');
@@ -25,7 +25,7 @@ if (fips3) {
   options.maxVersion = 'TLSv1.3';
 }
 
-if (!process.features.openssl_is_boringssl) {
+if (!isBoringSSL) {
   options.ciphers = fips3 ?
     'ECDHE-RSA-AES256-GCM-SHA384' : 'RSA@SECLEVEL=0';
 }
@@ -84,7 +84,7 @@ function second(server, session) {
   // Offering the cached session to a server using another TLS version should
   // not prevent a fresh connection.
   req.on('response', common.mustCall(function(res) {
-    // The test is now complete for OpenSSL 1.1.0.
+    // The test is now complete.
     server.close();
   }));
 

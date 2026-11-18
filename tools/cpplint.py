@@ -300,6 +300,7 @@ Syntax: cpplint.py [--verbose=#] [--output=emacs|eclipse|vs7|junit|sed|gsed]
 _ERROR_CATEGORIES = [
     "build/c++11",
     "build/c++17",
+    "build/crypto_backend",
     "build/deprecated",
     "build/endif_comment",
     "build/explicit_make_pair",
@@ -350,6 +351,7 @@ _ERROR_CATEGORIES = [
     "runtime/printf_format",
     "runtime/references",
     "runtime/string",
+    "runtime/thread_local",
     "runtime/threadsafe_fn",
     "runtime/vlog",
     "runtime/v8_persistent",
@@ -7446,6 +7448,81 @@ def CheckStringValueUsage(filename, lines, error):
             'Use node::TwoByteValue instead.')
 
 
+def CheckThreadLocalUsage(filename, lines, error):
+  """Logs an error if thread_local is used in src/.
+  Args:
+    filename: The name of the current file.
+    lines: An array of strings, each representing a line of the file.
+    error: The function to call with any errors found.
+  """
+  if not (filename.startswith('src/') or filename.startswith('src\\')):
+    return
+
+  for linenum, line in enumerate(lines):
+    if re.search(r'\bthread_local\b', line.split('//', 1)[0]):
+      error(filename, linenum, 'runtime/thread_local', 5,
+            'Several Environments can share a thread, so keep state that '
+            'belongs to one on the Environment or its BindingData. Mark '
+            'intentionally per-thread state with '
+            'NOLINTNEXTLINE(runtime/thread_local).')
+
+
+def CheckCryptoBackendUsage(filename, clean_lines, error):
+  """Require explicit BoringSSL guards and unsupported-backend fallbacks.
+
+  Gates excluding BoringSSL must name it instead of using the provider
+  selector. Backend alternatives must explicitly reject unsupported backends;
+  other feature checks remain valid.
+  """
+  provider = re.compile(r'\bNCRYPTO_USE_OPENSSL_PROVIDER\b')
+  boring = re.compile(r'\b(?:NCRYPTO_USE_BORINGSSL|OPENSSL_IS_BORINGSSL)\b')
+  directives = re.compile(
+      r'^\s*#\s*(if|ifdef|ifndef|elif|elifdef|elifndef|else|endif|error)\b(.*)$')
+  stack = []
+  lines = iter(enumerate(clean_lines.lines))
+  for linenum, line in lines:
+    # Preprocessor conditions can span multiple physical lines.
+    while line.endswith('\\'):
+      line = line[:-1] + next(lines, (0, ''))[1]
+    match = directives.match(line)
+    if not match:
+      continue
+    directive, condition = match.groups()
+    if directive in ('if', 'ifdef', 'ifndef'):
+      stack.append({
+          'linenum': linenum,
+          'provider': bool(provider.search(condition)),
+          'boring': bool(boring.search(condition)),
+          'alternative': False,
+          'else': False,
+          'error': False,
+      })
+    elif stack:
+      group = stack[-1]
+      if directive in ('elif', 'elifdef', 'elifndef'):
+        group['provider'] |= bool(provider.search(condition))
+        group['boring'] |= bool(boring.search(condition))
+        group['alternative'] = True
+      elif directive == 'else':
+        group['alternative'] = True
+        group['else'] = True
+      elif directive == 'error' and group['else']:
+        if condition.strip() == '"Unsupported crypto backend"':
+          group['error'] = True
+      elif directive == 'endif':
+        stack.pop()
+        if group['provider'] and not group['boring']:
+          error(filename, group['linenum'], 'build/crypto_backend', 5,
+                'Crypto backend guards must name BoringSSL explicitly; '
+                'use #if !NCRYPTO_USE_BORINGSSL for BoringSSL exclusions.')
+        elif ((group['provider'] or group['boring']) and group['alternative'] and
+            not (group['else'] and group['error'])):
+          error(filename, group['linenum'], 'build/crypto_backend', 5,
+                'Crypto backend alternatives must end with '
+                '#else and #error "Unsupported crypto backend"; '
+                'use an explicit #elif for each supported backend.')
+
+
 def ProcessLine(
     filename,
     file_extension,
@@ -7608,6 +7685,10 @@ def ProcessFileData(filename, file_extension, lines, error, extra_check_function
     CheckLocalVectorUsage(filename, lines, error)
 
     CheckStringValueUsage(filename, lines, error)
+
+    CheckThreadLocalUsage(filename, lines, error)
+
+    CheckCryptoBackendUsage(filename, clean_lines, error)
 
 
 def ProcessConfigOverrides(filename):

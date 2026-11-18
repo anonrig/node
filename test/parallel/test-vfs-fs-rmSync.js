@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.rmSync, fs.rmdirSync, and fs.unlinkSync dispatch to VFS.
@@ -9,13 +9,12 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-rmSync-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src/subdir', { recursive: true });
 myVfs.writeFileSync('/src/hello.txt', 'hello');
 myVfs.writeFileSync('/src/subdir/inside.txt', 'inside');
 myVfs.mkdirSync('/empty');
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 // rmdirSync on an empty directory
 fs.rmdirSync(path.join(mountPoint, 'empty'));

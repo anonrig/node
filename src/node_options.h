@@ -99,17 +99,20 @@ class DebugOptions : public Options {
     break_first_line = true;
   }
 
-  void DisableWaitOrBreakFirstLine() {
-    inspect_wait = false;
-    break_first_line = false;
-  }
-
   bool wait_for_connect() const {
     return break_first_line || break_node_first_line || inspect_wait;
   }
 
   bool should_break_first_line() const {
     return break_first_line || break_node_first_line;
+  }
+
+  const char* inspector_option_name() const {
+    if (break_node_first_line) return "--inspect-brk-node";
+    if (break_first_line) return "--inspect-brk";
+    if (inspect_wait) return "--inspect-wait";
+    if (inspector_enabled) return "--inspect";
+    return nullptr;
   }
 
   void CheckOptions(std::vector<std::string>* errors,
@@ -139,6 +142,9 @@ class EnvironmentOptions : public Options {
   std::string heap_snapshot_signal;
   std::string redirect_warnings;
   std::string diagnostic_dir;
+  std::string bench_gc;
+  std::string bench_isolation = "process";
+  std::string bench_name_pattern;
   std::string test_rerun_failures_path;
   std::string test_global_setup_path;
   std::string test_isolation = "process";
@@ -148,8 +154,9 @@ class EnvironmentOptions : public Options {
   std::string watch_mode_kill_signal = "SIGTERM";
   std::string eval_string;
   std::string tls_keylog;
-  std::string experimental_config_file_path;
+  std::string config_file_path;
   std::string experimental_package_map_path;
+  std::string vfs_load_source;
 #if HAVE_INSPECTOR
   std::string cpu_prof_dir;
   std::string cpu_prof_name;
@@ -158,9 +165,12 @@ class EnvironmentOptions : public Options {
 #endif  // HAVE_INSPECTOR
 
   std::vector<std::string> conditions;
+  std::vector<std::string> allow_env;
   std::vector<std::string> allow_fs_read;
   std::vector<std::string> allow_fs_write;
   std::vector<std::string> disable_warnings;
+  std::vector<std::string> bench_reporter;
+  std::vector<std::string> bench_reporter_destination;
   std::vector<std::string> env_file;
   std::vector<std::string> optional_env_file;
   std::vector<std::string> test_name_pattern;
@@ -170,7 +180,6 @@ class EnvironmentOptions : public Options {
   std::vector<std::string> experimental_test_tag_filter;
   std::vector<std::string> coverage_include_pattern;
   std::vector<std::string> coverage_exclude_pattern;
-  std::vector<std::string> userland_loaders;
   std::vector<std::string> watch_mode_paths;
   std::vector<std::string> preload_cjs_modules;
   std::vector<std::string> preload_esm_modules;
@@ -179,6 +188,8 @@ class EnvironmentOptions : public Options {
   int64_t heap_snapshot_near_heap_limit = 0;
   uint64_t network_family_autoselection_attempt_timeout = 500;
   uint64_t max_http_header_size = 16 * 1024;
+  uint64_t bench_samples = 0;
+  uint64_t bench_warmup = 0;
   uint64_t test_runner_concurrency = 0;
   uint64_t test_runner_timeout = 0;
   uint64_t test_coverage_branches = 0;
@@ -200,12 +211,16 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(require_module) = true;
   DEFINE_BOOL_FIELD(enable_source_maps) = false;
   DEFINE_BOOL_FIELD(experimental_addon_modules) = true;
+  DEFINE_BOOL_FIELD(experimental_bench) = EXPERIMENTALS_DEFAULT_VALUE;
   DEFINE_BOOL_FIELD(experimental_eventsource) = EXPERIMENTALS_DEFAULT_VALUE;
-  DEFINE_BOOL_FIELD(experimental_ffi) = EXPERIMENTALS_DEFAULT_VALUE;
+  DEFINE_BOOL_FIELD(experimental_ffi) = HAVE_FFI;
+  DEFINE_BOOL_FIELD(experimental_web_worker) = true;
   DEFINE_BOOL_FIELD(experimental_websocket) = true;
   DEFINE_BOOL_FIELD(experimental_sqlite) = HAVE_SQLITE;
   DEFINE_BOOL_FIELD(experimental_stream_iter) = EXPERIMENTALS_DEFAULT_VALUE;
-  DEFINE_BOOL_FIELD(experimental_vfs) = EXPERIMENTALS_DEFAULT_VALUE;
+  DEFINE_BOOL_FIELD(experimental_vfs) = true;
+  DEFINE_BOOL_FIELD(vfs_load) = false;
+  DEFINE_BOOL_FIELD(sea_vfs) = false;
   DEFINE_BOOL_FIELD(webstorage) = HAVE_SQLITE;
   DEFINE_BOOL_FIELD(experimental_dtls) = EXPERIMENTALS_DEFAULT_VALUE;
   DEFINE_BOOL_FIELD(experimental_quic) = EXPERIMENTALS_DEFAULT_VALUE;
@@ -218,6 +233,7 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(permission) = false;
   DEFINE_BOOL_FIELD(permission_audit) = false;
   DEFINE_BOOL_FIELD(allow_addons) = false;
+  DEFINE_BOOL_FIELD(allow_fs_vfs) = false;
   DEFINE_BOOL_FIELD(allow_inspector) = false;
   DEFINE_BOOL_FIELD(allow_child_process) = false;
   DEFINE_BOOL_FIELD(allow_net) = false;
@@ -226,7 +242,6 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(allow_openssl_store) = false;
   DEFINE_BOOL_FIELD(allow_worker_threads) = false;
   DEFINE_BOOL_FIELD(experimental_vm_modules) = EXPERIMENTALS_DEFAULT_VALUE;
-  DEFINE_BOOL_FIELD(async_context_frame) = true;
   DEFINE_BOOL_FIELD(expose_internals) = false;
   DEFINE_BOOL_FIELD(force_node_api_uncaught_exceptions_policy) = false;
   DEFINE_BOOL_FIELD(frozen_intrinsics) = false;
@@ -242,6 +257,10 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(preserve_symlinks_main) = false;
   DEFINE_BOOL_FIELD(prof_process) = false;
   DEFINE_BOOL_FIELD(has_env_file_string) = false;
+  DEFINE_BOOL_FIELD(bench_runner) = false;
+  DEFINE_BOOL_FIELD(has_bench_options) = false;
+  DEFINE_BOOL_FIELD(has_bench_samples) = false;
+  DEFINE_BOOL_FIELD(has_bench_warmup) = false;
   DEFINE_BOOL_FIELD(test_runner) = false;
   DEFINE_BOOL_FIELD(test_runner_coverage) = false;
   DEFINE_BOOL_FIELD(test_runner_force_exit) = false;
@@ -250,6 +269,7 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(test_randomize) = false;
   DEFINE_BOOL_FIELD(has_test_random_seed) = false;
   DEFINE_BOOL_FIELD(test_only) = false;
+  DEFINE_BOOL_FIELD(test_forbid_only) = false;
   DEFINE_BOOL_FIELD(test_udp_no_try_send) = false;
   DEFINE_BOOL_FIELD(coverage_include_all) = false;
   DEFINE_BOOL_FIELD(throw_deprecation) = false;
@@ -282,6 +302,8 @@ class EnvironmentOptions : public Options {
   DEFINE_BOOL_FIELD(tls_max_v1_2) = false;
   DEFINE_BOOL_FIELD(tls_max_v1_3) = false;
   DEFINE_BOOL_FIELD(strip_types) = HAVE_AMARO;
+  DEFINE_BOOL_FIELD(experimental_strip_private_modules) =
+      EXPERIMENTALS_DEFAULT_VALUE;
   DEFINE_BOOL_FIELD(report_exclude_env) = false;
   DEFINE_BOOL_FIELD(report_exclude_network) = false;
 #if HAVE_INSPECTOR
@@ -303,12 +325,22 @@ class EnvironmentOptions : public Options {
   void CheckOptions(std::vector<std::string>* errors,
                     std::vector<std::string>* argv) override;
 
+  // `--bench` and the other benchmark runner options are gated behind
+  // `--experimental-bench`, but the gate and the options it guards can come
+  // from different option sources, each of which is parsed in its own
+  // options_parser::Parse() pass. CheckOptions() runs at the end of every
+  // pass, so this constraint cannot be validated there: the gate may still
+  // arrive in a later pass. Callers must invoke this once all of their option
+  // sources have been parsed.
+  void CheckBenchOptions(std::vector<std::string>* errors) const;
+
  private:
   DebugOptions debug_options_;
 };
 
 class PerIsolateOptions : public Options {
  public:
+  bool worker_snapshot = true;  // --[no-]worker-snapshot
   PerIsolateOptions() = default;
   PerIsolateOptions(PerIsolateOptions&&) = default;
 
@@ -376,6 +408,10 @@ class PerProcessOptions : public Options {
   std::string report_filename;
   // TODO(addaleax): Some of these could probably be per-Environment.
   std::string use_largepages = "off";
+  // --process-timeout, as passed on the command line (e.g. "30s").
+  std::string process_timeout;
+  // The parsed value of --process-timeout, or 0 if it was not passed.
+  uint64_t process_timeout_ms = 0;
 
   std::vector<std::string> security_reverts;
   std::vector<std::string> cmdline;
@@ -408,21 +444,35 @@ class PerProcessOptions : public Options {
   DEFINE_BOOL_FIELD(use_openssl_ca) = false;
   DEFINE_BOOL_FIELD(use_bundled_ca) = false;
   DEFINE_BOOL_FIELD(enable_fips_crypto) = false;
+  DEFINE_BOOL_FIELD(enable_fips_indicator_events) = false;
   DEFINE_BOOL_FIELD(force_fips_crypto) = false;
+  std::string force_fips_crypto_policy = "provider";
 #endif  // HAVE_OPENSSL
-#if OPENSSL_VERSION_MAJOR >= 3
+#if HAVE_OPENSSL && !defined(OPENSSL_IS_BORINGSSL)
   DEFINE_BOOL_FIELD(openssl_legacy_provider) = false;
   DEFINE_BOOL_FIELD(openssl_shared_config) = false;
 #endif
 
   DEFINE_BOOL_FIELD(disable_wasm_trap_handler) = false;
   DEFINE_BOOL_FIELD(report_on_fatalerror) = false;
+  DEFINE_BOOL_FIELD(report_on_process_timeout) = false;
   DEFINE_BOOL_FIELD(report_compact) = false;
   DEFINE_BOOL_FIELD(trace_sigint) = false;
+  // Tracks whether `--run` was passed, since an empty `run` is ambiguous
+  // between "not passed" and "passed without a script name" (lists scripts).
+  DEFINE_BOOL_FIELD(has_run) = false;
 
   inline PerIsolateOptions* get_per_isolate_options();
   void CheckOptions(std::vector<std::string>* errors,
                     std::vector<std::string>* argv) override;
+
+  // `--process-timeout` conflicts with options that can come from different
+  // option sources (e.g. `--inspect` from NODE_OPTIONS), each of which is
+  // parsed in its own options_parser::Parse() pass. Callers must invoke this
+  // once all of their option sources have been parsed. `argv` holds the
+  // remaining non-option arguments, starting with the program name.
+  void CheckProcessTimeoutOptions(std::vector<std::string>* errors,
+                                  const std::vector<std::string>& argv) const;
 };
 
 // The actual options parser, as opposed to the structs containing them:
@@ -461,6 +511,7 @@ std::vector<std::string> MapAvailableNamespaces();
 // Define all namespace entries
 #define OPTION_NAMESPACE_LIST(V)                                               \
   V(kNoNamespace, "")                                                          \
+  V(kBenchRunnerNamespace, "bench")                                            \
   V(kTestRunnerNamespace, "test")                                              \
   V(kWatchNamespace, "watch")                                                  \
   V(kPermissionNamespace, "permission")
@@ -516,12 +567,12 @@ class OptionsParser {
       OptionEnvvarSettings env_setting = kDisallowedInEnvvar,
       bool default_is_true = false,
       OptionNamespaces namespace_id = OptionNamespaces::kNoNamespace);
-  void AddOption(
-      const char* name,
-      const char* help_text,
-      uint64_t Options::*field,
-      OptionEnvvarSettings env_setting = kDisallowedInEnvvar,
-      OptionNamespaces namespace_id = OptionNamespaces::kNoNamespace);
+  void AddOption(const char* name,
+                 const char* help_text,
+                 uint64_t Options::*field,
+                 OptionEnvvarSettings env_setting = kDisallowedInEnvvar,
+                 OptionNamespaces namespace_id = OptionNamespaces::kNoNamespace,
+                 bool strict = false);
   void AddOption(
       const char* name,
       const char* help_text,
@@ -687,6 +738,7 @@ class OptionsParser {
     std::string help_text;
     bool default_is_true = false;
     std::string namespace_id;
+    bool strict = false;
   };
 
   // An implied option is composed of the information on where to store a

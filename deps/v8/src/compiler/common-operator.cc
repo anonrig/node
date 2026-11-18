@@ -136,8 +136,8 @@ bool operator!=(DeoptimizeParameters lhs, DeoptimizeParameters rhs) {
 }
 
 size_t hash_value(DeoptimizeParameters p) {
-  FeedbackSource::Hash feebdack_hash;
-  return base::hash_combine(p.reason(), feebdack_hash(p.feedback()));
+  FeedbackSource::Hash feedback_hash;
+  return base::hash_combine(p.reason(), feedback_hash(p.feedback()));
 }
 
 std::ostream& operator<<(std::ostream& os, DeoptimizeParameters p) {
@@ -515,6 +515,32 @@ const ExitMachineGraphParameters& ExitMachineGraphParametersOf(
   return OpParameter<ExitMachineGraphParameters>(op);
 }
 
+#if V8_ENABLE_SANDBOX
+size_t hash_value(const LoadTrustedPointerParameters& params) {
+  return base::hash_combine(params.offset, params.tag);
+}
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(
+    std::ostream& os, LoadTrustedPointerParameters params) {
+  return os << "offset=" << params.offset << ", tag.first=" << params.tag.first
+            << ", tag.last=" << params.tag.last;
+}
+
+class LoadTrustedPointerOperator final
+    : public Operator1<LoadTrustedPointerParameters> {
+ public:
+  LoadTrustedPointerOperator(int offset, IndirectPointerTagRange tag)
+      : Operator1<LoadTrustedPointerParameters>(
+            IrOpcode::kLoadTrustedPointer, Operator::kEliminatable,
+            "LoadTrustedPointer", 1, 1, 1, 1, 1, 0, {offset, tag}) {}
+};
+
+const Operator* CommonOperatorBuilder::LoadTrustedPointer(
+    int offset, IndirectPointerTagRange tag) {
+  return zone_->New<LoadTrustedPointerOperator>(offset, tag);
+}
+#endif  // V8_ENABLE_SANDBOX
+
 #define COMMON_CACHED_OP_LIST(V)                          \
   V(Plug, Operator::kNoProperties, 0, 0, 0, 1, 0, 0)      \
   V(Dead, Operator::kFoldable, 0, 0, 0, 1, 1, 1)          \
@@ -757,12 +783,12 @@ struct CommonOperatorGlobalCache final {
       kBeginRegionNotObservableOperator;
 
   template <size_t kInputCount>
-  struct LoopOperator final : public Operator {
+  struct LoopOperator final : public Operator1<FeedbackSource> {
     LoopOperator()
-        : Operator(                                 // --
+        : Operator1<FeedbackSource>(                // --
               IrOpcode::kLoop, Operator::kKontrol,  // opcode
               "Loop",                               // name
-              0, 0, kInputCount, 0, 0, 1) {}        // counts
+              0, 0, kInputCount, 0, 0, 1, {}) {}    // counts
   };
 #define CACHED_LOOP(input_count) \
   LoopOperator<input_count> kLoop##input_count##Operator;
@@ -1197,24 +1223,26 @@ const Operator* CommonOperatorBuilder::Start(int value_output_count) {
       0, 0, 0, value_output_count, 1, 1);                          // counts
 }
 
-
-const Operator* CommonOperatorBuilder::Loop(int control_input_count) {
-  switch (control_input_count) {
+const Operator* CommonOperatorBuilder::Loop(int control_input_count,
+                                            const FeedbackSource& feedback) {
+  if (!feedback.IsValid()) {
+    switch (control_input_count) {
 #define CACHED_LOOP(input_count) \
   case input_count:              \
     return &cache_.kLoop##input_count##Operator;
-    CACHED_LOOP_LIST(CACHED_LOOP)
+      CACHED_LOOP_LIST(CACHED_LOOP)
 #undef CACHED_LOOP
-    default:
-      break;
+      default:
+        break;
+    }
   }
   // Uncached.
-  return zone()->New<Operator>(             // --
-      IrOpcode::kLoop, Operator::kKontrol,  // opcode
-      "Loop",                               // name
-      0, 0, control_input_count, 0, 0, 1);  // counts
+  return zone()->New<Operator1<FeedbackSource>>(  // --
+      IrOpcode::kLoop, Operator::kKontrol,        // opcode
+      "Loop",                                     // name
+      0, 0, control_input_count, 0, 0, 1,         // counts
+      feedback);                                  // parameter
 }
-
 
 const Operator* CommonOperatorBuilder::Merge(int control_input_count) {
   switch (control_input_count) {

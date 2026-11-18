@@ -5,7 +5,7 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-const { hasOpenSSL, hasFIPS } = require('../common/crypto');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
 
 const assert = require('assert');
 const { getFips } = require('crypto');
@@ -60,7 +60,7 @@ const kWrappingData = {
 if (fips3)
   delete kWrappingData['ChaCha20-Poly1305'];
 
-if (hasOpenSSL(3) && !fips3) {
+if (!isBoringSSL && !fips3) {
   kWrappingData['AES-OCB'] = {
     generate: { length: 128 },
     wrap: {
@@ -206,7 +206,7 @@ async function generateKeysToWrap() {
     },
   ];
 
-  if (hasOpenSSL(3, 5) || process.features.openssl_is_boringssl) {
+  if (hasOpenSSL(3, 5) || isBoringSSL) {
     for (const name of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
       parameters.push({
         algorithm: { name },
@@ -217,7 +217,7 @@ async function generateKeysToWrap() {
     }
   }
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     parameters.push(
       {
         algorithm: {
@@ -390,13 +390,13 @@ function testWrapping(name, keys) {
       for (const name of ['X25519', 'X448']) {
         await assert.rejects(
           subtle.generateKey({ name }, true, ['deriveBits']),
-          (err) => err.name === 'OperationError' &&
-                   err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED');
+          { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
       }
     }
 
-    const wrappingKey = await subtle.generateKey(
-      { name: 'AES-OCB', length: 128 }, true, ['wrapKey']);
+    await assert.rejects(
+      subtle.generateKey({ name: 'AES-OCB', length: 128 }, true, ['wrapKey']),
+      { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
     const key = await subtle.generateKey(
       { name: 'HMAC', hash: 'SHA-256', length: 256 },
       true,
@@ -405,10 +405,9 @@ function testWrapping(name, keys) {
       subtle.wrapKey(
         'raw',
         key,
-        wrappingKey,
+        key,
         { name: 'AES-OCB', iv: new Uint8Array(15), tagLength: 128 }),
-      (err) => err.name === 'OperationError' &&
-               err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED');
+      { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
   }
 
   await generateWrappingKeys();
@@ -485,28 +484,38 @@ async function testNonByteLengthWrapUnwrap({
     implicitAlgorithm: hmacAlgorithm,
   });
 
-  if (hasOpenSSL(3) && getFips() !== 1) {
-    const kmacAlgorithm = { name: 'KMAC128' };
-    const kmacKey = await subtle.importKey(
-      'raw-secret',
-      new Uint8Array([0xff, 0xff]),
-      { ...kmacAlgorithm, length: 9 },
-      true,
-      ['sign', 'verify']);
-    await testNonByteLengthWrapUnwrap({
-      key: kmacKey,
-      formats: ['raw-secret', 'jwk'],
-      rawFormat: 'raw-secret',
-      explicitAlgorithm: { ...kmacAlgorithm, length: 9 },
-      implicitAlgorithm: kmacAlgorithm,
-    });
+  if (!isBoringSSL && getFips() !== 1) {
+    for (const name of ['KMAC128', 'KMAC256']) {
+      const keyData = new Uint8Array(32).fill(0xff);
+      const kmacKey = await subtle.importKey(
+        'raw-secret', keyData, name, true, ['sign', 'verify']);
+      const wrappingKey = await subtle.generateKey(
+        { name: 'AES-GCM', length: 128 }, true, ['wrapKey', 'unwrapKey']);
+
+      for (const [i, format] of ['raw-secret', 'jwk'].entries()) {
+        const wrapAlgorithm = { name: 'AES-GCM', iv: new Uint8Array(12).fill(i) };
+        const wrapped = await subtle.wrapKey(format, kmacKey, wrappingKey, wrapAlgorithm);
+        await assert.rejects(
+          subtle.unwrapKey(
+            format, wrapped, wrappingKey, wrapAlgorithm,
+            { name, length: 255 }, true, ['sign', 'verify']),
+          { name: 'NotSupportedError', message: 'Invalid key length' });
+
+        const unwrapped = await subtle.unwrapKey(
+          format, wrapped, wrappingKey, wrapAlgorithm,
+          { name, length: 256 }, true, ['sign', 'verify']);
+        assert.strictEqual(unwrapped.algorithm.length, 256);
+        assert.deepStrictEqual(
+          new Uint8Array(await subtle.exportKey('raw-secret', unwrapped)), keyData);
+      }
+    }
   }
 })().then(common.mustCall());
 
 // Test that wrapKey/unwrapKey validate the wrapping/unwrapping key's
 // algorithm and usage before proceeding.
 // Spec: https://w3c.github.io/webcrypto/#SubtleCrypto-method-wrapKey
-// Steps 9-10 (wrapping key checks) must precede step 12 (exportKey).
+// Steps 9-10 (wrapping key checks) must precede step 13 (export operation).
 (async function() {
   const hmacKey = await subtle.generateKey(
     { name: 'HMAC', hash: 'SHA-256' },
@@ -551,7 +560,7 @@ async function testNonByteLengthWrapUnwrap({
     });
 
   // Correct wrapping key algorithm and usage results in the expected
-  // exportKey error (not the wrapping key validation error).
+  // export operation error (not the wrapping key validation error).
   const wrapKey = await subtle.generateKey(
     { name: 'AES-GCM', length: 128 },
     true,
@@ -563,8 +572,29 @@ async function testNonByteLengthWrapUnwrap({
       name: 'AES-GCM',
       iv: new Uint8Array(12),
     }), {
-      // exportKey('spki', privateKey) throws NotSupportedError
-      name: 'NotSupportedError',
+      message: 'Key must be a public key',
+      name: 'InvalidAccessError',
+    });
+
+  // Symmetric case: exporting a public key as 'pkcs8' must also fail with
+  // InvalidAccessError, not the generic NotSupportedError.
+  await assert.rejects(
+    subtle.wrapKey('pkcs8', ecKey.publicKey, wrapKey, {
+      name: 'AES-GCM',
+      iv: new Uint8Array(12),
+    }), {
+      message: 'Key must be a private key',
+      name: 'InvalidAccessError',
+    });
+
+  // Exporting a private key as 'raw' must also fail with InvalidAccessError.
+  await assert.rejects(
+    subtle.wrapKey('raw', ecKey.privateKey, wrapKey, {
+      name: 'AES-GCM',
+      iv: new Uint8Array(12),
+    }), {
+      message: 'Key must be a public key',
+      name: 'InvalidAccessError',
     });
 
   // --- unwrapKey validation tests ---

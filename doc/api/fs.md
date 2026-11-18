@@ -265,7 +265,8 @@ added: v16.11.0
   * `emitClose` {boolean} **Default:** `true`
   * `start` {integer}
   * `end` {integer} **Default:** `Infinity`
-  * `highWaterMark` {integer} **Default:** `64 * 1024`
+  * `highWaterMark` {integer} **Default:** `64 * 1024`, or the value set with
+    [`stream.setDefaultHighWaterMark()`][]
   * `signal` {AbortSignal|undefined} **Default:** `undefined`
 * Returns: {fs.ReadStream}
 
@@ -386,6 +387,7 @@ added: v10.0.0
 <!-- YAML
 added:
  - v25.9.0
+ - v24.20.0
 -->
 
 > Stability: 1 - Experimental
@@ -411,8 +413,9 @@ Return the file contents as an async iterable using the
 chunks (default 128 KB). If transforms are provided, they are applied
 via [`stream/iter pull()`][].
 
-The file handle is locked while the iterable is being consumed and unlocked
-when iteration completes, an error occurs, or the consumer breaks.
+The file handle is locked from the first read of the iterable, and unlocked
+when iteration completes, an error occurs, or the consumer breaks. An iterable
+that is never read does not lock the file handle.
 
 This function is only available when the `--experimental-stream-iter` flag is
 enabled.
@@ -464,6 +467,7 @@ run().catch(console.error);
 <!-- YAML
 added:
  - v25.9.0
+ - v24.20.0
 -->
 
 > Stability: 1 - Experimental
@@ -485,8 +489,8 @@ Synchronous counterpart of [`filehandle.pull()`][]. Returns a sync iterable
 that reads the file using synchronous I/O on the main thread. Reads are
 performed in `chunkSize`-byte chunks (default 128 KB).
 
-The file handle is locked while the iterable is being consumed. Unlike the
-async `pull()`, this method does not support `AbortSignal` since all
+The file handle is locked from the first read of the iterable until iteration
+ends, as with [`filehandle.pull()`][]. Unlike the async `pull()`, this method does not support `AbortSignal` since all
 operations are synchronous.
 
 This function is only available when the `--experimental-stream-iter` flag is
@@ -778,7 +782,8 @@ added: v18.11.0
   * `emitClose` {boolean} **Default:** `true`
   * `start` {integer}
   * `end` {integer} **Default:** `Infinity`
-  * `highWaterMark` {integer} **Default:** `64 * 1024`
+  * `highWaterMark` {integer} **Default:** `64 * 1024`, or the value set with
+    [`stream.setDefaultHighWaterMark()`][]
 * Returns: {readline.InterfaceConstructor}
 
 Convenience method to create a `readline` interface and stream over the file.
@@ -1068,6 +1073,7 @@ the end of the file.
 <!-- YAML
 added:
  - v25.9.0
+ - v24.20.0
 -->
 
 > Stability: 1 - Experimental
@@ -1131,6 +1137,11 @@ The writer supports both `Symbol.asyncDispose` and `Symbol.dispose`:
   for it to complete.
 * `using w = fh.writer()` — calls `fail()` unconditionally.
 
+Async writes (`write()` and `writev()`) that are started without awaiting the
+previous one are performed one at a time, in the order they were called, so
+they never overlap in the file. A queued write is not performed if the writer
+fails, or its `signal` aborts, before its turn.
+
 The `writeSync()` and `writevSync()` methods enable the try-sync fast path
 used by [`stream/iter pipeTo()`][]. When the reader's chunk size matches the
 writer's `chunkSize`, all writes in a `pipeTo()` pipeline complete
@@ -1190,6 +1201,8 @@ changes:
    pr-url: https://github.com/nodejs/node/pull/58467
    description: No longer experimental.
 -->
+
+* Returns: {Promise}
 
 Calls `filehandle.close()` and returns a promise that fulfills when the
 filehandle is closed.
@@ -1332,6 +1345,10 @@ changes:
 Asynchronously copies `src` to `dest`. By default, `dest` is overwritten if it
 already exists.
 
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
+
 No guarantees are made about the atomicity of the copy operation. If an
 error occurs after the destination file has been opened for writing, an attempt
 will be made to remove the destination.
@@ -1415,6 +1432,9 @@ behavior is similar to `cp dir1/ dir2/`.
 <!-- YAML
 added: v22.0.0
 changes:
+  - version: v26.9.0
+    pr-url: https://github.com/nodejs/node/pull/64003
+    description: Add support for the `maxDepth` option.
   - version:
      - v26.1.0
      - v24.16.0
@@ -1444,17 +1464,21 @@ changes:
 * `options` {Object}
   * `cwd` {string|URL} current working directory. **Default:** `process.cwd()`
   * `exclude` {Function|string\[]} Function to filter out files/directories or a
-    list of glob patterns to be excluded. If a function is provided, return
+    list of [glob patterns][] to be excluded. If a function is provided, return
     `true` to exclude the item, `false` to include it. **Default:** `undefined`.
     If a string array is provided, each string should be a glob pattern that
     specifies paths to exclude. Note: Negation patterns (e.g., '!foo.js') are
     not supported.
   * `followSymlinks` {boolean} When `true`, symbolic links to directories are
     followed while expanding `**` patterns. **Default:** `false`.
+  * `maxDepth` {integer} Maximum number of directory levels to traverse.
+    The `cwd` directory has a depth of `0`. **Default:** `Infinity`.
   * `withFileTypes` {boolean} `true` if the glob should return paths as Dirents,
     `false` otherwise. **Default:** `false`.
 * Returns: {AsyncIterator} An AsyncIterator that yields the paths of files
   that match the pattern.
+
+See [Glob patterns][] for the syntax `pattern` accepts.
 
 When `followSymlinks` is enabled, detected symbolic link cycles are not
 traversed recursively.
@@ -1478,6 +1502,7 @@ const { glob } = require('node:fs/promises');
 ### `fsPromises.lchmod(path, mode)`
 
 <!-- YAML
+added: v10.0.0
 deprecated: v10.0.0
 -->
 
@@ -1544,6 +1569,10 @@ link(2) documentation for more detail.
 <!-- YAML
 added: v10.0.0
 changes:
+  - version: v26.8.0
+    pr-url: https://github.com/nodejs/node/pull/63143
+    description: Accepts an additional `signal` option to allow aborting the
+                 operation.
   - version: v10.5.0
     pr-url: https://github.com/nodejs/node/pull/20220
     description: Accepts an additional `options` object to specify whether
@@ -1554,6 +1583,8 @@ changes:
 * `options` {Object}
   * `bigint` {boolean} Whether the numeric values in the returned
     {fs.Stats} object should be `bigint`. **Default:** `false`.
+  * `signal` {AbortSignal} An AbortSignal to cancel the operation.
+    **Default:** `undefined`.
 * Returns: {Promise}  Fulfills with the {fs.Stats} object for the given
   symbolic link `path`.
 
@@ -1616,6 +1647,9 @@ makeDirectory().catch(console.error);
 <!-- YAML
 added: v10.0.0
 changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64397
+    description: The `encoding` option now defaults to `'buffer'` if `prefix` is a `Buffer`.
   - version:
     - v20.6.0
     - v18.19.0
@@ -1630,9 +1664,11 @@ changes:
 
 * `prefix` {string|Buffer|URL}
 * `options` {string|Object}
-  * `encoding` {string} **Default:** `'utf8'`
-* Returns: {Promise}  Fulfills with a string containing the file system path
-  of the newly created temporary directory.
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
+* Returns: {Promise} Fulfills with the created directory path.
+  If `encoding` is `'buffer'`, then the resulting directory
+  path is returned as a {Buffer}. Otherwise, the path is returned as a
+  {string} using the specified encoding.
 
 Creates a unique temporary directory. A unique directory name is generated by
 appending six random characters to the end of the provided `prefix`. Due to
@@ -1665,20 +1701,25 @@ characters directly to the `prefix` string. For instance, given a directory
 
 <!-- YAML
 added: v24.4.0
+changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64397
+    description: The `encoding` option now defaults to `'buffer'` if `prefix` is a `Buffer`.
 -->
 
 * `prefix` {string|Buffer|URL}
 * `options` {string|Object}
-  * `encoding` {string} **Default:** `'utf8'`
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
 * Returns: {Promise} Fulfills with a Promise for an async-disposable Object:
-  * `path` {string} The path of the created directory.
+  * `path` {string|Buffer} The path of the created directory.
   * `remove` {AsyncFunction} A function which removes the created directory.
   * `[Symbol.asyncDispose]` {AsyncFunction} The same as `remove`.
 
 The resulting Promise holds an async-disposable object whose `path` property
-holds the created directory path. When the object is disposed, the directory
-and its contents will be removed asynchronously if it still exists. If the
-directory cannot be deleted, disposal will throw an error. The object has an
+holds the created directory path. If `encoding` is `'buffer'`, the `path` will
+also be a {Buffer}, otherwise a {string}. When the object is disposed, the
+directory and its contents will be removed asynchronously if it still exists. If
+the directory cannot be deleted, disposal will throw an error. The object has an
 async `remove()` method which will perform the same task.
 
 Both this function and the disposal function on the resulting object are
@@ -1692,6 +1733,58 @@ For detailed information, see the documentation of [`fsPromises.mkdtemp()`][].
 
 The optional `options` argument can be a string specifying an encoding, or an
 object with an `encoding` property specifying the character encoding to use.
+
+### `fsPromises.mkstemp(prefix[, options])`
+
+<!-- YAML
+added: v27.0.0-alpha.0.0.0
+-->
+
+> Stability: 1 - Experimental
+
+* `prefix` {string|Buffer|URL}
+* `options` {string|Object}
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
+* Returns: {Promise} Fulfills with an {Object}:
+  * `path` {string|Buffer} The path of the created file.
+  * `handle` {FileHandle} The created file, opened for reading and writing.
+
+Creates and opens a unique temporary file. A unique file name is generated by
+appending six random characters to the end of the provided `prefix`. Due to
+platform inconsistencies, avoid trailing `X` characters in `prefix`. Some
+platforms, notably the BSDs, can return more than six random characters, and
+replace trailing `X` characters in `prefix` with random characters.
+
+The file is created and opened in a single operation, so another process cannot
+create a file with the same name in between. On POSIX systems, the file is only
+readable and writable by its owner.
+
+The optional `options` argument can be a string specifying an encoding, or an
+object with an `encoding` property specifying the character encoding to use for
+the returned `path`.
+
+```mjs
+import { mkstemp } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const { path, handle } = await mkstemp(join(tmpdir(), 'foo-'));
+try {
+  await handle.writeFile('some data');
+  console.log(path);
+  // Prints: /tmp/foo-itXde2 or C:\Users\...\AppData\Local\Temp\foo-itXde2
+} finally {
+  await handle.close();
+}
+```
+
+The file is not removed automatically. It is the caller's responsibility to
+close the {FileHandle} and to remove the file when it is no longer needed.
+
+As with [`fsPromises.mkdtemp()`][], the random characters are appended directly
+to `prefix`. To create a file _within_ a directory, `prefix` must end with a
+trailing platform-specific path separator (`require('node:path').sep`) or
+include the beginning of the file name.
 
 ### `fsPromises.open(path, flags[, mode])`
 
@@ -2084,6 +2177,10 @@ Removes files and directories (modeled on the standard POSIX `rm` utility).
 <!-- YAML
 added: v10.0.0
 changes:
+  - version: v26.8.0
+    pr-url: https://github.com/nodejs/node/pull/63143
+    description: Accepts an additional `signal` option to allow aborting the
+                 operation.
   - version: v25.7.0
     pr-url: https://github.com/nodejs/node/pull/61178
     description: Accepts a `throwIfNoEntry` option to specify whether
@@ -2101,6 +2198,8 @@ changes:
   * `throwIfNoEntry` {boolean} Whether an exception will be thrown
     if no file system entry exists, rather than returning `undefined`.
     **Default:** `true`.
+  * `signal` {AbortSignal} An AbortSignal to cancel the operation.
+    **Default:** `undefined`.
 * Returns: {Promise}  Fulfills with the {fs.Stats} object for the
   given `path`.
 
@@ -2216,13 +2315,14 @@ added:
     should stop.
   * `maxQueue` {number} Specifies the number of events to queue between iterations
     of the {AsyncIterator} returned. **Default:** `2048`.
-  * `overflow` {string} Either `'ignore'` or `'throw'` when there are more events to be
+  * `overflow` {string} Either `'ignore'` or `'error'` when there are more events to be
     queued than `maxQueue` allows. `'ignore'` means overflow events are dropped and a
-    warning is emitted, while `'throw'` means to throw an exception. **Default:** `'ignore'`.
+    warning is emitted, while `'error'` means to throw an exception. **Default:** `'ignore'`.
   * `ignore` {string|RegExp|Function|Array} Pattern(s) to ignore. Strings are
-    glob patterns (using [`minimatch`][]), RegExp patterns are tested against
-    the filename, and functions receive the filename and return `true` to
-    ignore. **Default:** `undefined`.
+    [glob patterns][] that, when they contain no `/`, are matched against the
+    file's basename; RegExp patterns are tested against the filename, and
+    functions receive the filename and return `true` to ignore.
+    **Default:** `undefined`.
 * Returns: {AsyncIterator} of objects with the properties:
   * `eventType` {string} The type of change
   * `filename` {string|Buffer|null} The name of the file changed.
@@ -2849,6 +2949,10 @@ callback function. Node.js makes no guarantees about the atomicity of the copy
 operation. If an error occurs after the destination file has been opened for
 writing, Node.js will attempt to remove the destination.
 
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
+
 `mode` is an optional integer that specifies the behavior
 of the copy operation. It is possible to create a mask consisting of the bitwise
 OR of two or more values (e.g.
@@ -2944,7 +3048,9 @@ behavior is similar to `cp dir1/ dir2/`.
 <!-- YAML
 added: v0.1.31
 changes:
-  - version: REPLACEME
+  - version:
+     - v26.8.0
+     - v24.21.0
     pr-url: https://github.com/nodejs/node/pull/63851
     description: Add the `windowsHandle` option.
   - version: v16.10.0
@@ -3000,7 +3106,8 @@ changes:
   * `emitClose` {boolean} **Default:** `true`
   * `start` {integer}
   * `end` {integer} **Default:** `Infinity`
-  * `highWaterMark` {integer} **Default:** `64 * 1024`
+  * `highWaterMark` {integer} **Default:** `64 * 1024`, or the value set with
+    [`stream.setDefaultHighWaterMark()`][]
   * `fs` {Object|null} **Default:** `null`
   * `signal` {AbortSignal|null} **Default:** `null`
   * `windowsHandle` {bigint} A raw Win32 `HANDLE` value to read from, in place
@@ -3081,7 +3188,9 @@ If `options` is a string, then it specifies the encoding.
 <!-- YAML
 added: v0.1.31
 changes:
-  - version: REPLACEME
+  - version:
+     - v26.8.0
+     - v24.21.0
     pr-url: https://github.com/nodejs/node/pull/63851
     description: Add the `windowsHandle` option.
   - version: v22.0.0
@@ -3437,6 +3546,10 @@ exception are given to the completion callback.
 <!-- YAML
 added: v0.1.95
 changes:
+  - version: v26.8.0
+    pr-url: https://github.com/nodejs/node/pull/63143
+    description: Accepts an additional `signal` option to allow aborting the
+                 operation.
   - version: v18.0.0
     pr-url: https://github.com/nodejs/node/pull/41678
     description: Passing an invalid callback to the `callback` argument
@@ -3460,6 +3573,8 @@ changes:
 * `options` {Object}
   * `bigint` {boolean} Whether the numeric values in the returned
     {fs.Stats} object should be `bigint`. **Default:** `false`.
+  * `signal` {AbortSignal} An AbortSignal to cancel the operation.
+    **Default:** `undefined`.
 * `callback` {Function}
   * `err` {Error}
   * `stats` {fs.Stats}
@@ -3600,6 +3715,9 @@ descriptor. See [`fs.utimes()`][].
 <!-- YAML
 added: v22.0.0
 changes:
+  - version: v26.9.0
+    pr-url: https://github.com/nodejs/node/pull/64003
+    description: Add support for the `maxDepth` option.
   - version:
      - v26.1.0
      - v24.16.0
@@ -3630,10 +3748,12 @@ changes:
 * `options` {Object}
   * `cwd` {string|URL} current working directory. **Default:** `process.cwd()`
   * `exclude` {Function|string\[]} Function to filter out files/directories or a
-    list of glob patterns to be excluded. If a function is provided, return
+    list of [glob patterns][] to be excluded. If a function is provided, return
     `true` to exclude the item, `false` to include it. **Default:** `undefined`.
   * `followSymlinks` {boolean} When `true`, symbolic links to directories are
     followed while expanding `**` patterns. **Default:** `false`.
+  * `maxDepth` {integer} Maximum number of directory levels to traverse.
+    The `cwd` directory has a depth of `0`. **Default:** `Infinity`.
   * `withFileTypes` {boolean} `true` if the glob should return paths as Dirents,
     `false` otherwise. **Default:** `false`.
 
@@ -3641,6 +3761,8 @@ changes:
   * `err` {Error}
 
 * Retrieves the files matching the specified pattern.
+
+See [Glob patterns][] for the syntax `pattern` accepts.
 
 When `followSymlinks` is enabled, detected symbolic link cycles are not
 traversed recursively.
@@ -3666,7 +3788,8 @@ glob('**/*.js', (err, matches) => {
 ### `fs.lchmod(path, mode, callback)`
 
 <!-- YAML
-deprecated: v0.4.7
+added: v0.5.0
+deprecated: v0.5.0
 changes:
   - version: v18.0.0
     pr-url: https://github.com/nodejs/node/pull/41678
@@ -3803,6 +3926,10 @@ exception are given to the completion callback.
 <!-- YAML
 added: v0.1.30
 changes:
+  - version: v26.8.0
+    pr-url: https://github.com/nodejs/node/pull/63143
+    description: Accepts an additional `signal` option to allow aborting the
+                 operation.
   - version: v18.0.0
     pr-url: https://github.com/nodejs/node/pull/41678
     description: Passing an invalid callback to the `callback` argument
@@ -3830,6 +3957,8 @@ changes:
 * `options` {Object}
   * `bigint` {boolean} Whether the numeric values in the returned
     {fs.Stats} object should be `bigint`. **Default:** `false`.
+  * `signal` {AbortSignal} An AbortSignal to cancel the operation.
+    **Default:** `undefined`.
 * `callback` {Function}
   * `err` {Error}
   * `stats` {fs.Stats}
@@ -3926,6 +4055,9 @@ See the POSIX mkdir(2) documentation for more details.
 <!-- YAML
 added: v5.10.0
 changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64397
+    description: The `encoding` option now defaults to `'buffer'` if `prefix` is a `Buffer`.
   - version:
     - v20.6.0
     - v18.19.0
@@ -3956,10 +4088,10 @@ changes:
 
 * `prefix` {string|Buffer|URL}
 * `options` {string|Object}
-  * `encoding` {string} **Default:** `'utf8'`
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
 * `callback` {Function}
   * `err` {Error}
-  * `directory` {string}
+  * `directory` {string|Buffer}
 
 Creates a unique temporary directory.
 
@@ -3969,11 +4101,13 @@ inconsistencies, avoid trailing `X` characters in `prefix`. Some platforms,
 notably the BSDs, can return more than six random characters, and replace
 trailing `X` characters in `prefix` with random characters.
 
-The created directory path is passed as a string to the callback's second
-parameter.
-
 The optional `options` argument can be a string specifying an encoding, or an
 object with an `encoding` property specifying the character encoding to use.
+
+The created directory path is passed to the callback's second parameter. If
+`encoding` is `'buffer'`, then the resulting directory path is passed as a
+{Buffer}. Otherwise, the path is passed as a {string} using the specified
+encoding.
 
 ```mjs
 import { mkdtemp } from 'node:fs';
@@ -4019,6 +4153,66 @@ mkdtemp(`${tmpDir}${sep}`, (err, directory) => {
   // the /tmp directory.
 });
 ```
+
+### `fs.mkstemp(prefix[, options], callback)`
+
+<!-- YAML
+added: v27.0.0-alpha.0.0.0
+-->
+
+> Stability: 1 - Experimental
+
+* `prefix` {string|Buffer|URL}
+* `options` {string|Object}
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
+* `callback` {Function}
+  * `err` {Error}
+  * `file` {Object}
+    * `path` {string|Buffer} The path of the created file.
+    * `fd` {integer} A file descriptor for the created file, opened for
+      reading and writing.
+
+Creates and opens a unique temporary file.
+
+Generates six random characters to be appended behind a required `prefix` to
+create a unique temporary file. Due to platform inconsistencies, avoid trailing
+`X` characters in `prefix`. Some platforms, notably the BSDs, can return more
+than six random characters, and replace trailing `X` characters in `prefix`
+with random characters.
+
+The file is created and opened in a single operation, so another process cannot
+create a file with the same name in between. On POSIX systems, the file is only
+readable and writable by its owner.
+
+The optional `options` argument can be a string specifying an encoding, or an
+object with an `encoding` property specifying the character encoding to use for
+the `path` passed to the callback.
+
+```mjs
+import { mkstemp, write, close } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+mkstemp(join(tmpdir(), 'foo-'), (err, file) => {
+  if (err) throw err;
+  console.log(file.path);
+  // Prints: /tmp/foo-itXde2 or C:\Users\...\AppData\Local\Temp\foo-itXde2
+  write(file.fd, 'some data', (err) => {
+    if (err) throw err;
+    close(file.fd, (err) => {
+      if (err) throw err;
+    });
+  });
+});
+```
+
+The file is not removed automatically. It is the caller's responsibility to
+close the file descriptor and to remove the file when it is no longer needed.
+
+As with [`fs.mkdtemp()`][], the random characters are appended directly to
+`prefix`. To create a file _within_ a directory, `prefix` must end with a
+trailing platform-specific path separator (`require('node:path').sep`) or
+include the beginning of the file name.
 
 ### `fs.open(path[, flags[, mode]], callback)`
 
@@ -5288,9 +5482,10 @@ changes:
   * `throwIfNoEntry` {boolean} Indicates whether an exception should be thrown when the
     path does not exist. **Default:** `true`.
   * `ignore` {string|RegExp|Function|Array} Pattern(s) to ignore. Strings are
-    glob patterns (using [`minimatch`][]), RegExp patterns are tested against
-    the filename, and functions receive the filename and return `true` to
-    ignore. **Default:** `undefined`.
+    [glob patterns][] that, when they contain no `/`, are matched against the
+    file's basename; RegExp patterns are tested against the filename, and
+    functions receive the filename and return `true` to ignore.
+    **Default:** `undefined`.
 * `listener` {Function|undefined} **Default:** `undefined`
   * `eventType` {string}
   * `filename` {string|Buffer|null}
@@ -6017,6 +6212,10 @@ already exists. Returns `undefined`. Node.js makes no guarantees about the
 atomicity of the copy operation. If an error occurs after the destination file
 has been opened for writing, Node.js will attempt to remove the destination.
 
+Symbolic links are followed. If `src` is a symbolic link, the target file is
+copied. If `dest` is a symbolic link, the target file is overwritten unless
+`mode` contains `fs.constants.COPYFILE_EXCL`.
+
 `mode` is an optional integer that specifies the behavior
 of the copy operation. It is possible to create a mask consisting of the bitwise
 OR of two or more values (e.g.
@@ -6233,6 +6432,9 @@ Synchronous version of [`fs.futimes()`][]. Returns `undefined`.
 <!-- YAML
 added: v22.0.0
 changes:
+  - version: v26.9.0
+    pr-url: https://github.com/nodejs/node/pull/64003
+    description: Add support for the `maxDepth` option.
   - version:
      - v26.1.0
      - v24.16.0
@@ -6262,13 +6464,17 @@ changes:
 * `options` {Object}
   * `cwd` {string|URL} current working directory. **Default:** `process.cwd()`
   * `exclude` {Function|string\[]} Function to filter out files/directories or a
-    list of glob patterns to be excluded. If a function is provided, return
+    list of [glob patterns][] to be excluded. If a function is provided, return
     `true` to exclude the item, `false` to include it. **Default:** `undefined`.
   * `followSymlinks` {boolean} When `true`, symbolic links to directories are
     followed while expanding `**` patterns. **Default:** `false`.
+  * `maxDepth` {integer} Maximum number of directory levels to traverse.
+    The `cwd` directory has a depth of `0`. **Default:** `Infinity`.
   * `withFileTypes` {boolean} `true` if the glob should return paths as Dirents,
     `false` otherwise. **Default:** `false`.
 * Returns: {string\[]} paths of files that match the pattern.
+
+See [Glob patterns][] for the syntax `pattern` accepts.
 
 When `followSymlinks` is enabled, detected symbolic link cycles are not
 traversed recursively.
@@ -6288,7 +6494,8 @@ console.log(globSync('**/*.js'));
 ### `fs.lchmodSync(path, mode)`
 
 <!-- YAML
-deprecated: v0.4.7
+added: v0.5.0
+deprecated: v0.5.0
 -->
 
 > Stability: 0 - Deprecated
@@ -6426,6 +6633,9 @@ See the POSIX mkdir(2) documentation for more details.
 <!-- YAML
 added: v5.10.0
 changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64397
+    description: The `encoding` option now defaults to `'buffer'` if `prefix` is a `Buffer`.
   - version:
     - v20.6.0
     - v18.19.0
@@ -6440,10 +6650,12 @@ changes:
 
 * `prefix` {string|Buffer|URL}
 * `options` {string|Object}
-  * `encoding` {string} **Default:** `'utf8'`
-* Returns: {string}
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
+* Returns: {string|Buffer}
 
-Returns the created directory path.
+Returns the created directory path. If `encoding` is `'buffer'`, then the
+resulting directory path is returned as a {Buffer}. Otherwise, the path
+is returned as a {string} using the specified encoding.
 
 For detailed information, see the documentation of the asynchronous version of
 this API: [`fs.mkdtemp()`][].
@@ -6455,21 +6667,25 @@ object with an `encoding` property specifying the character encoding to use.
 
 <!-- YAML
 added: v24.4.0
+changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64397
+    description: The `encoding` option now defaults to `'buffer'` if `prefix` is a `Buffer`.
 -->
 
 * `prefix` {string|Buffer|URL}
 * `options` {string|Object}
-  * `encoding` {string} **Default:** `'utf8'`
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
 * Returns: {Object} A disposable object:
-  * `path` {string} The path of the created directory.
+  * `path` {string|Buffer} The path of the created directory.
   * `remove` {Function} A function which removes the created directory.
   * `[Symbol.dispose]` {Function} The same as `remove`.
 
 Returns a disposable object whose `path` property holds the created directory
-path. When the object is disposed, the directory and its contents will be
-removed if it still exists. If the directory cannot be deleted, disposal will
-throw an error. The object has a `remove()` method which will perform the same
-task.
+path. If `encoding` is `'buffer'`, the `path` will be a {Buffer}. When the
+object is disposed, the directory and its contents will be removed if it still
+exists. If the directory cannot be deleted, disposal will throw an error. The
+object has a `remove()` method which will perform the same task.
 
 See the [MDN documentation on `using` statements][`using`] for more information about
 explicit resource management.
@@ -6481,6 +6697,45 @@ with the [`using`][] syntax.
 
 The optional `options` argument can be a string specifying an encoding, or an
 object with an `encoding` property specifying the character encoding to use.
+
+### `fs.mkstempSync(prefix[, options])`
+
+<!-- YAML
+added: v27.0.0-alpha.0.0.0
+-->
+
+> Stability: 1 - Experimental
+
+* `prefix` {string|Buffer|URL}
+* `options` {string|Object}
+  * `encoding` {string} **Default:** `'utf8'` (or `'buffer'` if `prefix` is a `Buffer`)
+* Returns: {Object}
+  * `path` {string|Buffer} The path of the created file.
+  * `fd` {integer} A file descriptor for the created file, opened for reading
+    and writing.
+
+Synchronously creates and opens a unique temporary file.
+
+For detailed information, see the documentation of the asynchronous version of
+this API: [`fs.mkstemp()`][].
+
+The optional `options` argument can be a string specifying an encoding, or an
+object with an `encoding` property specifying the character encoding to use for
+the returned `path`.
+
+### `fs.openAsBlobSync(path[, options])`
+
+<!-- YAML
+added: v26.10.0
+-->
+
+* `path` {string|Buffer|URL}
+* `options` {Object}
+  * `type` {string} An optional mime type for the blob.
+* Returns: {Blob}
+
+For detailed information, see the documentation of the Promise-returning
+version of this API: [`fs.openAsBlob()`][].
 
 ### `fs.opendirSync(path[, options])`
 
@@ -7271,8 +7526,9 @@ Asynchronously read the next directory entry via readdir(3) as an
 A promise is returned that will be fulfilled with an {fs.Dirent}, or `null`
 if there are no more directory entries to read.
 
-Directory entries returned by this function are in no particular order as
-provided by the operating system's underlying directory mechanisms.
+For directory reads handled by the native file system, directory entries
+returned by this function are in no particular order as provided by the
+operating system's underlying directory mechanisms.
 Entries added or removed while iterating over the directory might not be
 included in the iteration results.
 
@@ -7348,6 +7604,8 @@ changes:
    description: No longer experimental.
 -->
 
+* Returns: {Promise}
+
 Calls `dir.close()` if the directory handle is open, and returns a promise that
 fulfills when disposal is complete.
 
@@ -7387,6 +7645,13 @@ directory entry is a combination of the file name and file type pairs.
 Additionally, when [`fs.readdir()`][] or [`fs.readdirSync()`][] is called with
 the `withFileTypes` option set to `true`, the resulting array is filled with
 {fs.Dirent} objects, rather than strings or {Buffer}s.
+
+When a directory is read, such as with [`fs.readdir()`][] or
+[`fs.opendir()`][], the file type of each entry is the type reported by the
+operating system and may depend on the file system; for example, some file
+systems may report a type that differs from what [`fs.lstat()`][] returns.
+Node.js calls [`fs.lstat()`][] on such an entry only when the reported type
+is unknown. Use [`fs.lstat()`][] when an accurate file type is required.
 
 #### `dirent.isBlockDevice()`
 
@@ -8444,12 +8709,19 @@ Close the stream gracefully, flushing the internal buffer before closing.
 * `callback` {Function}
   * `err` {Error|null} An error if the flush failed, otherwise `null`.
 
-Writes the current buffer to the file if a write was not in progress. Do
-nothing if `minLength` is zero or if it is already writing.
+Writes the current buffer to the file. The callback is invoked after pending
+writes complete and, unless the `fsync` option is enabled, after the data has
+been synchronized with `fs.fsync()`. `fsync` errors indicating that the file
+descriptor does not support synchronization (for example, a pipe or a TTY)
+are ignored.
 
 #### `utf8Stream.flushSync()`
 
 Flushes the buffered data synchronously. This is a costly operation.
+
+If an asynchronous write is in flight when `flushSync()` is called, only the
+data queued after it is written, and it may reach the file before the data
+of the in-flight write.
 
 #### `utf8Stream.fsync`
 
@@ -8495,12 +8767,12 @@ Reopen the file in place, useful for log rotation.
 
 #### `utf8Stream.write(data)`
 
-* `data` {string|Buffer} The data to write.
+* `data` {string|Buffer|TypedArray|DataView} The data to write.
 * Returns {boolean}
 
 When the `options.contentMode` is set to `'utf8'` when the stream is created,
 the `data` argument must be a string. If the `contentMode` is set to `'buffer'`,
-the `data` argument must be a {Buffer}.
+the `data` argument must be a {Buffer}, {TypedArray}, or {DataView}.
 
 #### `utf8Stream.writing`
 
@@ -8762,12 +9034,14 @@ The following constants are meant for use with `fs.open()`.
   <tr>
     <td><code>O_SYNC</code></td>
     <td>Flag indicating that the file is opened for synchronized I/O with write
-    operations waiting for file integrity.</td>
+    operations waiting for file integrity. On Windows, this maps to
+    <code>FILE_FLAG_WRITE_THROUGH</code>.</td>
   </tr>
   <tr>
     <td><code>O_DSYNC</code></td>
     <td>Flag indicating that the file is opened for synchronized I/O with write
-    operations waiting for data integrity.</td>
+    operations waiting for data integrity. On Windows, this maps to
+    <code>FILE_FLAG_WRITE_THROUGH</code>.</td>
   </tr>
   <tr>
     <td><code>O_SYMLINK</code></td>
@@ -8777,7 +9051,7 @@ The following constants are meant for use with `fs.open()`.
   <tr>
     <td><code>O_DIRECT</code></td>
     <td>When set, an attempt will be made to minimize caching effects of file
-    I/O.</td>
+    I/O. On Windows, this maps to <code>FILE_FLAG_NO_BUFFERING</code>.</td>
   </tr>
   <tr>
     <td><code>O_NONBLOCK</code></td>
@@ -9174,6 +9448,101 @@ example `fs.readdirSync('C:\\')` can potentially return a different result than
 `fs.readdirSync('C:')`. For more information, see
 [this MSDN page][MSDN-Rel-Path].
 
+### Glob patterns
+
+[`fs.glob()`][], [`fs.globSync()`][], [`fsPromises.glob()`][] and
+[`path.matchesGlob()`][] take glob patterns, as do the string forms of the
+`exclude` and `ignore` options. The syntax follows the pattern matching of
+`bash`, with brace expansion and the extended `extglob` operators.
+
+The glob implementation Node.js uses was adopted from [`minimatch`][],
+so as a general rule of thumb, all minimatch-supported glob extensions
+work with `fs`. For simplicity, such extensions have been documented below:
+
+#### Path separators
+
+A pattern is always split on `/`, on every platform. A backslash in a pattern
+is treated as a path separator as well, and never as an escape character, so
+patterns built with `path.join()` on Windows still work. Repeated separators
+are collapsed, so `a//b` and `a/b` are the same pattern.
+
+#### Wildcards
+
+Wildcards match within a single path segment, and never match a `/`:
+
+| Pattern            | Matches                                    |
+| ------------------ | ------------------------------------------ |
+| `*`                | Any run of characters, including none      |
+| `?`                | Exactly one character                      |
+| `[abc]`            | Any one of the characters in the set       |
+| `[a-z]`            | Any one character in the range             |
+| `[!abc]`, `[^abc]` | Any one character not in the set           |
+| `[[:alpha:]]`      | Any one character in the named POSIX class |
+
+```js
+path.matchesGlob('src/index.js', 'src/*.js'); // true
+path.matchesGlob('src/lib/index.js', 'src/*.js'); // false
+path.matchesGlob('file1.txt', 'file[0-9].txt'); // true
+path.matchesGlob('é', '[[:alpha:]]'); // true
+```
+
+#### Globstar
+
+A `**` that makes up a whole path segment matches zero or more segments, so
+`a/**/b` matches both `a/b` and `a/x/y/b`.
+
+```js
+path.matchesGlob('src/a/b/index.js', 'src/**/*.js'); // true
+path.matchesGlob('src/index.js', 'src/**/*.js'); // true
+```
+
+#### Extended globs
+
+Each of these takes a `|`-separated list of alternatives, and they may nest:
+
+| Pattern   | Matches                         |
+| --------- | ------------------------------- |
+| `?(a\|b)` | Zero or one of the alternatives |
+| `*(a\|b)` | Zero or more of them            |
+| `+(a\|b)` | One or more of them             |
+| `@(a\|b)` | Exactly one of them             |
+| `!(a\|b)` | Anything except them            |
+
+```js
+path.matchesGlob('index.ts', '*.@(js|ts)'); // true
+path.matchesGlob('index.css', '!(*.js)'); // true
+```
+
+#### Brace expansion
+
+Braces expand to alternatives before anything else in the pattern is
+interpreted. `{a,b}` is a list, `{1..9}` and `{a..z}` are sequences, and a
+sequence may take a step (`{1..9..3}`) and keep zero padding (`{01..12}`).
+Braces nest. A brace group containing neither a comma nor a sequence is
+literal.
+
+```js
+path.matchesGlob('src/index.ts', 'src/*.{js,ts}'); // true
+path.matchesGlob('page3.html', 'page{1..5}.html'); // true
+path.matchesGlob('a{b}c', 'a{b}c'); // true
+```
+
+#### Dot files
+
+A path segment beginning with a `.` is matched only by a pattern segment
+beginning with a literal `.`, so `*` and `**` do not match dot files or
+directories.
+
+```js
+path.matchesGlob('.env', '*'); // false
+path.matchesGlob('.env', '.*'); // true
+```
+
+#### Case sensitivity
+
+Matching is case-sensitive, except on Windows and macOS, where the file system
+is not case-sensitive itself.
+
 ### File descriptors
 
 On POSIX systems, for every process, the kernel maintains a table of currently
@@ -9345,12 +9714,13 @@ the file contents.
 [FS constants]: #fs-constants
 [File access constants]: #file-access-constants
 [File modes]: #file-modes
+[Glob patterns]: #glob-patterns
 [MDN-Date]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date
 [MDN-Number]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Data_structures#number_type
 [MSDN-Rel-Path]: https://docs.microsoft.com/en-us/windows/desktop/FileIO/naming-a-file#fully-qualified-vs-relative-paths
 [MSDN-Using-Streams]: https://docs.microsoft.com/en-us/windows/desktop/FileIO/using-streams
 [Naming Files, Paths, and Namespaces]: https://docs.microsoft.com/en-us/windows/desktop/FileIO/naming-a-file
-[`AHAFS`]: https://developer.ibm.com/articles/au-aix_event_infrastructure/
+[`AHAFS`]: https://www.ibm.com/docs/en/aix/7.3.0?topic=management-aix-event-infrastructure-aix-aix-clusters-ahafs
 [`Buffer.byteLength`]: buffer.md#static-method-bufferbytelengthstring-encoding
 [`FSEvents`]: https://developer.apple.com/documentation/coreservices/file_system_events
 [`Number.MAX_SAFE_INTEGER`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER
@@ -9374,11 +9744,15 @@ the file contents.
 [`fs.fstat()`]: #fsfstatfd-options-callback
 [`fs.ftruncate()`]: #fsftruncatefd-len-callback
 [`fs.futimes()`]: #fsfutimesfd-atime-mtime-callback
+[`fs.glob()`]: #fsglobpattern-options-callback
+[`fs.globSync()`]: #fsglobsyncpattern-options
 [`fs.lstat()`]: #fslstatpath-options-callback
 [`fs.lutimes()`]: #fslutimespath-atime-mtime-callback
 [`fs.mkdir()`]: #fsmkdirpath-options-callback
 [`fs.mkdtemp()`]: #fsmkdtempprefix-options-callback
+[`fs.mkstemp()`]: #fsmkstempprefix-options-callback
 [`fs.open()`]: #fsopenpath-flags-mode-callback
+[`fs.openAsBlob()`]: #fsopenasblobpath-options
 [`fs.opendir()`]: #fsopendirpath-options-callback
 [`fs.opendirSync()`]: #fsopendirsyncpath-options
 [`fs.read()`]: #fsreadfd-buffer-offset-length-position-callback
@@ -9402,6 +9776,7 @@ the file contents.
 [`fs.writev()`]: #fswritevfd-buffers-position-callback
 [`fsPromises.access()`]: #fspromisesaccesspath-mode
 [`fsPromises.copyFile()`]: #fspromisescopyfilesrc-dest-mode
+[`fsPromises.glob()`]: #fspromisesglobpattern-options
 [`fsPromises.mkdtemp()`]: #fspromisesmkdtempprefix-options
 [`fsPromises.open()`]: #fspromisesopenpath-flags-mode
 [`fsPromises.opendir()`]: #fspromisesopendirpath-options
@@ -9412,8 +9787,10 @@ the file contents.
 [`kqueue(2)`]: https://www.freebsd.org/cgi/man.cgi?query=kqueue&sektion=2
 [`minimatch`]: https://github.com/isaacs/minimatch
 [`node:stream/iter`]: stream_iter.md
+[`path.matchesGlob()`]: path.md#pathmatchesglobpath-pattern
 [`statfs.bsize`]: #statfsbsize
 [`stream.getDefaultHighWaterMark()`]: stream.md#streamgetdefaulthighwatermarkobjectmode
+[`stream.setDefaultHighWaterMark()`]: stream.md#streamsetdefaulthighwatermarkobjectmode-value
 [`stream/iter pipeTo()`]: stream_iter.md#pipetosource-transforms-writer-options
 [`stream/iter pull()`]: stream_iter.md#pullsource-transforms-options
 [`stream/iter pullSync()`]: stream_iter.md#pullsyncsource-transforms
