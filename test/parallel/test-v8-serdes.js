@@ -57,6 +57,17 @@ const hostObject = new (internalBinding('js_stream').JSStream)();
 }
 
 {
+  const buffer = Buffer.from([1, 2, 3, 4]);
+  Object.defineProperty(buffer, Symbol.toStringTag, {
+    value: 'CustomBuffer',
+  });
+
+  const deserialized = v8.deserialize(v8.serialize(buffer));
+  assert(Buffer.isBuffer(deserialized));
+  assert.deepStrictEqual(deserialized, Buffer.from(buffer));
+}
+
+{
   const ser = new v8.DefaultSerializer();
   ser._getDataCloneError = common.mustCall((message) => {
     assert.strictEqual(message, '#<Object> could not be cloned.');
@@ -184,7 +195,7 @@ const hostObject = new (internalBinding('js_stream').JSStream)();
     Consider opening an issue as a heads up at https://github.com/nodejs/node/issues/new
   `;
 
-  const desStr = 'ff0f6f2203666f6f5e007b01';
+  const desStr = 'ff106f2203666f6f5e007b01';
 
   const desBuf = Buffer.from(desStr, 'hex');
   const des = new v8.DefaultDeserializer(desBuf);

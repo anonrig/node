@@ -105,7 +105,7 @@ Maybe<void> ChaCha20Poly1305CipherTraits::AdditionalConfig(
     ChaCha20Poly1305CipherConfig* params) {
   Environment* env = Environment::GetCurrent(args);
 
-  params->cipher = ncrypto::Cipher::CHACHA20_POLY1305;
+  params->cipher = ncrypto::Cipher::CHACHA20_POLY1305();
 
 #ifndef OPENSSL_IS_BORINGSSL
   // On BoringSSL, ChaCha20-Poly1305 is not exposed via the EVP_CIPHER registry
@@ -214,7 +214,7 @@ WebCryptoCipherStatus ChaCha20Poly1305CipherTraits::DoCipher(
     *out = ByteSource::Allocated(buf.release());
   }
   return WebCryptoCipherStatus::OK;
-#else
+#elif NCRYPTO_USE_OPENSSL_PROVIDER
   auto ctx = CipherCtxPointer::New();
   if (!ctx) {
     return WebCryptoCipherStatus::FAILED;
@@ -325,7 +325,9 @@ WebCryptoCipherStatus ChaCha20Poly1305CipherTraits::DoCipher(
   *out = ByteSource::Allocated(buf.release());
 
   return WebCryptoCipherStatus::OK;
-#endif  // OPENSSL_IS_BORINGSSL
+#else
+#error "Unsupported crypto backend"
+#endif
 }
 
 void ChaCha20Poly1305::Initialize(Environment* env, Local<Object> target) {

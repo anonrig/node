@@ -11,7 +11,6 @@ This a list of all the dependencies:
 * [acorn][]
 * [ada][]
 * [amaro][]
-* [base64][]
 * [brotli][]
 * [c-ares][]
 * [merve][]
@@ -22,8 +21,8 @@ This a list of all the dependencies:
 * [inspector\_protocol][inspector_protocol]
 * [libffi][]
 * [libuv][]
+* [LIEF][]
 * [llhttp][]
-* [minimatch][]
 * [nghttp2][]
 * [nghttp3][]
 * [ngtcp2][]
@@ -267,7 +266,7 @@ C++ testing and mocking framework.
 The [histogram](https://github.com/HdrHistogram/HdrHistogram_c) dependency is
 a C port of High Dynamic Range (HDR) Histogram.
 
-### ic
+### icu-small
 
 The [icu](http://site.icu-project.org) is widely used set of C/C++
 and Java libraries providing Unicode and Globalization
@@ -291,16 +290,16 @@ The [libuv](https://github.com/libuv/libuv) dependency is a
 multi-platform support library with a focus on asynchronous I/O.
 It was primarily developed for use by Node.js.
 
+### LIEF
+
+The [LIEF](https://github.com/lief-project/LIEF) dependency is used to
+generate single executable applications with `--build-sea`.
+
 ### llhttp
 
 The [llhttp](https://github.com/nodejs/llhttp) dependency is
 the http parser used by Node.js.
 See [maintaining-http][] for more information.
-
-### minimatch
-
-The [minimatch](https://github.com/isaacs/minimatch) dependency is a
-minimal matching utility.
 
 ### nghttp2
 
@@ -415,7 +414,6 @@ according to [RFC 8878](https://datatracker.ietf.org/doc/html/rfc8878).
 [acorn]: #acorn
 [ada]: #ada
 [amaro]: #amaro
-[base64]: #base64
 [brotli]: #brotli
 [c-ares]: #c-ares
 [corepack]: #corepack
@@ -426,6 +424,7 @@ according to [RFC 8878](https://datatracker.ietf.org/doc/html/rfc8878).
 [inspector_protocol]: #inspector_protocol
 [libffi]: #libffi
 [libuv]: #libuv
+[lief]: #lief
 [llhttp]: #llhttp
 [maintaining-V8]: ./maintaining-V8.md
 [maintaining-http]: ./maintaining-http.md
@@ -434,7 +433,6 @@ according to [RFC 8878](https://datatracker.ietf.org/doc/html/rfc8878).
 [maintaining-openssl]: ./maintaining-openssl.md
 [maintaining-web-assembly]: ./maintaining-web-assembly.md
 [merve]: #merve
-[minimatch]: #minimatch
 [nghttp2]: #nghttp2
 [nghttp3]: #nghttp3
 [ngtcp2]: #ngtcp2

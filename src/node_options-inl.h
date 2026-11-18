@@ -4,8 +4,10 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <ranges>
+#include <type_traits>
 #include "node_options.h"
 #include "util.h"
 
@@ -51,7 +53,8 @@ void OptionsParser<Options>::AddOption(const char* name,
                                        const char* help_text,
                                        uint64_t Options::*field,
                                        OptionEnvvarSettings env_setting,
-                                       OptionNamespaces namespace_id) {
+                                       OptionNamespaces namespace_id,
+                                       bool strict) {
   options_.emplace(
       name,
       OptionInfo{kUInteger,
@@ -59,7 +62,8 @@ void OptionsParser<Options>::AddOption(const char* name,
                  env_setting,
                  help_text,
                  false,
-                 NamespaceEnumToString(namespace_id)});
+                 NamespaceEnumToString(namespace_id),
+                 strict});
 }
 
 template <typename Options>
@@ -238,7 +242,8 @@ auto OptionsParser<Options>::Convert(
                     original.env_setting,
                     original.help_text,
                     original.default_is_true,
-                    original.namespace_id};
+                    original.namespace_id,
+                    original.strict};
 }
 
 template <typename Options>
@@ -462,18 +467,21 @@ void OptionsParser<Options>::Parse(
 
     std::string value;
     if (info.type != kBoolean && info.type != kNoOp && info.type != kV8Option) {
+      // `--run` may be passed without a script name to list available scripts,
+      // so an omitted value is not an error and must not swallow a later flag.
+      const bool optional_value = name == "--run";
       if (equals_index != std::string::npos) {
         value = arg.substr(equals_index + 1);
-        if (value.empty()) {
+        if (value.empty() && !optional_value) {
+          missing_argument();
+          break;
+        }
+      } else if (args.empty() || (optional_value && args.first()[0] == '-')) {
+        if (!optional_value) {
           missing_argument();
           break;
         }
       } else {
-        if (args.empty()) {
-          missing_argument();
-          break;
-        }
-
         value = args.pop_first();
 
         if (!value.empty() && value[0] == '-') {
@@ -498,10 +506,22 @@ void OptionsParser<Options>::Parse(
         *Lookup<int64_t>(info.field, options) = std::atoll(value.c_str());
         break;
       }
-      case kUInteger:
-        *Lookup<uint64_t>(info.field, options) =
-            std::strtoull(value.c_str(), nullptr, 10);
+      case kUInteger: {
+        if (!info.strict) {
+          *Lookup<uint64_t>(info.field, options) =
+              std::strtoull(value.c_str(), nullptr, 10);
+          break;
+        }
+        uint64_t parsed;
+        const char* end = value.data() + value.size();
+        const auto result = std::from_chars(value.data(), end, parsed);
+        if (result.ec != std::errc() || result.ptr != end) {
+          errors->push_back("invalid value for " + name);
+          break;
+        }
+        *Lookup<uint64_t>(info.field, options) = parsed;
         break;
+      }
       case kString:
         *Lookup<std::string>(info.field, options) = value;
         break;
@@ -520,6 +540,12 @@ void OptionsParser<Options>::Parse(
         break;
       default:
         UNREACHABLE();
+    }
+
+    // Record that `--run` was seen so an empty value can be distinguished from
+    // the option being absent. Guarded so it only compiles for the owning type.
+    if constexpr (std::is_same_v<Options, PerProcessOptions>) {
+      if (name == "--run") options->has_run = true;
     }
   }
   options->CheckOptions(errors, orig_args);

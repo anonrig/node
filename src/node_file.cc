@@ -40,6 +40,7 @@
 #include "req_wrap-inl.h"
 #include "stream_base-inl.h"
 #include "string_bytes.h"
+#include "threadpoolwork-inl.h"
 #include "uv.h"
 #include "v8-fast-api-calls.h"
 
@@ -63,6 +64,8 @@ namespace node {
 namespace fs {
 
 using v8::Array;
+using v8::ArrayBuffer;
+using v8::ArrayBufferView;
 using v8::BigInt;
 using v8::Context;
 using v8::EscapableHandleScope;
@@ -78,12 +81,15 @@ using v8::LocalVector;
 using v8::Maybe;
 using v8::MaybeLocal;
 using v8::Nothing;
+using v8::Null;
 using v8::Number;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::Promise;
 using v8::String;
 using v8::TryCatch;
+using v8::Uint32Array;
+using v8::Uint8Array;
 using v8::Undefined;
 using v8::Value;
 
@@ -96,6 +102,18 @@ constexpr char kPathSeparator = '/';
 #else
 const char* const kPathSeparator = "\\/";
 #endif
+
+// Returns the request wrap of an asynchronous fs call, which bindings receive
+// as the argument at `index`, or nullptr for a synchronous call (when fewer
+// arguments were passed).
+static FSReqBase* GetAsyncReqWrap(const FunctionCallbackInfo<Value>& args,
+                                  int index,
+                                  bool use_bigint = false) {
+  if (args.Length() <= index) return nullptr;
+  FSReqBase* req_wrap_async = GetReqWrap(args, index, use_bigint);
+  CHECK_NOT_NULL(req_wrap_async);
+  return req_wrap_async;
+}
 
 inline int64_t GetOffset(Local<Value> value) {
   return IsSafeJsInt(value) ? value.As<Integer>()->Value() : -1;
@@ -149,6 +167,20 @@ static const char* get_fs_func_name_by_type(uv_fs_type req_type) {
 #define GET_TRACE_ENABLED                                                      \
   (*TRACE_EVENT_API_GET_CATEGORY_GROUP_ENABLED(                                \
        TRACING_CATEGORY_NODE2(fs, sync)) != 0)
+// Checks a permission for an fs binding. A denial is reported through
+// `req_wrap_async` for an asynchronous call, or thrown for a synchronous call
+// (when `req_wrap_async` is nullptr).
+#define FS_THROW_IF_INSUFFICIENT_PERMISSIONS(                                  \
+    env, req_wrap_async, perm, resource)                                       \
+  do {                                                                         \
+    if ((req_wrap_async) != nullptr) {                                         \
+      ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(                                 \
+          env, req_wrap_async, perm, resource);                                \
+    } else {                                                                   \
+      THROW_IF_INSUFFICIENT_PERMISSIONS(env, perm, resource);                  \
+    }                                                                          \
+  } while (0)
+
 #define FS_SYNC_TRACE_BEGIN(syscall, ...)                                      \
   if (GET_TRACE_ENABLED)                                                       \
     TRACE_EVENT_BEGIN(                                                         \
@@ -213,6 +245,7 @@ typedef void (*uv_fs_callback_t)(uv_fs_t*);
 
 void FSContinuationData::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("paths", paths_);
+  tracker->TrackField("enoent_paths", enoent_paths_);
 }
 
 FileHandleReadWrap::~FileHandleReadWrap() = default;
@@ -322,7 +355,7 @@ std::unique_ptr<worker::TransferData> FileHandle::TransferForMessaging() {
 FileHandle::TransferData::TransferData(int fd) : fd_(fd) {}
 
 FileHandle::TransferData::~TransferData() {
-  if (fd_ > 0) {
+  if (fd_ >= 0) {
     uv_fs_t close_req;
     CHECK_NE(fd_, -1);
     FS_SYNC_TRACE_BEGIN(close);
@@ -455,7 +488,7 @@ void FileHandle::CloseReq::MemoryInfo(MemoryTracker* tracker) const {
 // Closes this FileHandle asynchronously and returns a Promise that will be
 // resolved when the callback is invoked, or rejects with a UVException if
 // there was a problem closing the fd. This is the preferred mechanism for
-// closing the FD object even tho the object will attempt to close
+// closing the FD object even though the object will attempt to close
 // automatically on gc.
 MaybeLocal<Promise> FileHandle::ClosePromise() {
   Isolate* isolate = env()->isolate();
@@ -756,6 +789,12 @@ void NewFSReqCallback(const FunctionCallbackInfo<Value>& args) {
   new FSReqCallback(binding_data, args.This(), args[0]->IsTrue());
 }
 
+void CancelFSReq(const FunctionCallbackInfo<Value>& args) {
+  FSReqBase* req_wrap;
+  ASSIGN_OR_RETURN_UNWRAP(&req_wrap, args.This());
+  req_wrap->Cancel();
+}
+
 FSReqAfterScope::FSReqAfterScope(FSReqBase* wrap, uv_fs_t* req)
     : wrap_(wrap),
       req_(req),
@@ -787,12 +826,15 @@ void FSReqAfterScope::Clear() {
 // in JS for more flexibility.
 void FSReqAfterScope::Reject(uv_fs_t* req) {
   BaseObjectPtr<FSReqBase> wrap{wrap_};
+  // libuv clears req->path when mkstemp() fails, so the template that was
+  // saved in the request is reported instead.
+  const bool is_mkstemp = req->fs_type == UV_FS_MKSTEMP;
   Local<Value> exception = UVException(wrap_->env()->isolate(),
                                        static_cast<int>(req->result),
                                        wrap_->syscall(),
                                        nullptr,
-                                       req->path,
-                                       wrap_->data());
+                                       is_mkstemp ? wrap_->data() : req->path,
+                                       is_mkstemp ? nullptr : wrap_->data());
   Clear();
   wrap->Reject(exception);
 }
@@ -879,6 +921,41 @@ void AfterOpenFileHandle(uv_fs_t* req) {
   }
 }
 
+// Delivers the result of mkstemp(): [path, fd], or [path, FileHandle].
+static void AfterMkstempImpl(uv_fs_t* req, bool as_file_handle) {
+  FSReqBase* req_wrap = FSReqBase::from_req(req);
+  FSReqAfterScope after(req_wrap, req);
+  FS_ASYNC_TRACE_END1(
+      req->fs_type, req_wrap, "result", static_cast<int>(req->result))
+  const int fd = static_cast<int>(req->result);
+  if (after.Proceed()) {
+    Environment* env = req_wrap->env();
+    return ResolveMkstemp(
+        req_wrap,
+        fd,
+        [&]() {
+          return StringBytes::Encode(
+              env->isolate(), req->path, req_wrap->encoding());
+        },
+        [&]() {
+          if (!as_file_handle) return MkstempFd(env, fd);
+          return MkstempFileHandle([&]() {
+            return FileHandle::New(req_wrap->binding_data(), fd, {}, req->path);
+          });
+        });
+  }
+  // The environment is shutting down: nothing will receive the descriptor.
+  if (fd >= 0) CloseMkstempFd(fd);
+}
+
+static void AfterMkstemp(uv_fs_t* req) {
+  AfterMkstempImpl(req, false);
+}
+
+static void AfterMkstempFileHandle(uv_fs_t* req) {
+  AfterMkstempImpl(req, true);
+}
+
 void AfterMkdirp(uv_fs_t* req) {
   FSReqBase* req_wrap = FSReqBase::from_req(req);
   FSReqAfterScope after(req_wrap, req);
@@ -888,16 +965,10 @@ void AfterMkdirp(uv_fs_t* req) {
     std::string first_path(req_wrap->continuation_data()->first_path());
     if (first_path.empty())
       return req_wrap->Resolve(Undefined(req_wrap->env()->isolate()));
-    Local<Value> path;
-    TryCatch try_catch(req_wrap->env()->isolate());
-    if (!StringBytes::Encode(req_wrap->env()->isolate(),
-                             first_path.c_str(),
-                             req_wrap->encoding())
-             .ToLocal(&path)) {
-      CHECK(try_catch.CanContinue());
-      return req_wrap->Reject(try_catch.Exception());
-    }
-    return req_wrap->Resolve(path);
+    ResolveOrReject(req_wrap, [&]() {
+      return StringBytes::Encode(
+          req_wrap->env()->isolate(), first_path.c_str(), req_wrap->encoding());
+    });
   }
 }
 
@@ -906,19 +977,11 @@ void AfterStringPath(uv_fs_t* req) {
   FSReqAfterScope after(req_wrap, req);
   FS_ASYNC_TRACE_END1(
       req->fs_type, req_wrap, "result", static_cast<int>(req->result))
-  MaybeLocal<Value> link;
-
   if (after.Proceed()) {
-    TryCatch try_catch(req_wrap->env()->isolate());
-    link = StringBytes::Encode(
-        req_wrap->env()->isolate(), req->path, req_wrap->encoding());
-    if (link.IsEmpty()) {
-      CHECK(try_catch.CanContinue());
-      req_wrap->Reject(try_catch.Exception());
-    } else {
-      Local<Value> val;
-      if (link.ToLocal(&val)) req_wrap->Resolve(val);
-    }
+    ResolveOrReject(req_wrap, [&]() {
+      return StringBytes::Encode(
+          req_wrap->env()->isolate(), req->path, req_wrap->encoding());
+    });
   }
 }
 
@@ -927,20 +990,12 @@ void AfterStringPtr(uv_fs_t* req) {
   FSReqAfterScope after(req_wrap, req);
   FS_ASYNC_TRACE_END1(
       req->fs_type, req_wrap, "result", static_cast<int>(req->result))
-  MaybeLocal<Value> link;
-
   if (after.Proceed()) {
-    TryCatch try_catch(req_wrap->env()->isolate());
-    link = StringBytes::Encode(req_wrap->env()->isolate(),
-                               static_cast<const char*>(req->ptr),
-                               req_wrap->encoding());
-    if (link.IsEmpty()) {
-      CHECK(try_catch.CanContinue());
-      req_wrap->Reject(try_catch.Exception());
-    } else {
-      Local<Value> val;
-      if (link.ToLocal(&val)) req_wrap->Resolve(val);
-    }
+    ResolveOrReject(req_wrap, [&]() {
+      return StringBytes::Encode(req_wrap->env()->isolate(),
+                                 static_cast<const char*>(req->ptr),
+                                 req_wrap->encoding());
+    });
   }
 }
 
@@ -1011,9 +1066,8 @@ void Access(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(*path);
   ToNamespacedPath(env, &path);
 
-  if (argc > 2) {  // access(path, mode, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // access(path, mode, req)
     ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
         env,
         req_wrap_async,
@@ -1052,9 +1106,8 @@ void Close(const FunctionCallbackInfo<Value>& args) {
   }
   env->RemoveUnmanagedFd(fd);
 
-  if (argc > 1) {  // close(fd, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 1);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 1);
+  if (req_wrap_async != nullptr) {  // close(fd, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_CLOSE, req_wrap_async)
     AsyncCall(
         env, req_wrap_async, args, "close", UTF8, AfterNoArgs, uv_fs_close, fd);
@@ -1144,16 +1197,16 @@ static void Stat(const FunctionCallbackInfo<Value>& args) {
   ToNamespacedPath(env, &path);
 
   bool use_bigint = args[1]->IsTrue();
-  if (!args[2]->IsUndefined()) {  // stat(path, use_bigint, req,
-                                  // do_not_throw_if_no_entry)
+  FSReqBase* req_wrap_async =
+      !args[2]->IsUndefined() ? GetAsyncReqWrap(args, 2, use_bigint) : nullptr;
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // stat(path, use_bigint, req,
+                                    // do_not_throw_if_no_entry)
     bool do_not_throw_if_no_entry = args[3]->IsFalse();
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2, use_bigint);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        path.ToStringView());
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_STAT, req_wrap_async, "path", TRACE_STR_COPY(*path))
     if (do_not_throw_if_no_entry) {
@@ -1176,8 +1229,6 @@ static void Stat(const FunctionCallbackInfo<Value>& args) {
                 *path);
     }
   } else {  // stat(path, use_bigint, undefined, do_not_throw_if_no_entry)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
     bool do_not_throw_if_no_entry = args[3]->IsFalse();
     FSReqWrapSync req_wrap_sync("stat", *path);
     FS_SYNC_TRACE_BEGIN(stat);
@@ -1308,14 +1359,13 @@ static void StatFs(const FunctionCallbackInfo<Value>& args) {
   ToNamespacedPath(env, &path);
 
   bool use_bigint = args[1]->IsTrue();
-  if (argc > 2) {  // statfs(path, use_bigint, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2, use_bigint);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2, use_bigint);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // statfs(path, use_bigint, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_STATFS, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -1327,8 +1377,6 @@ static void StatFs(const FunctionCallbackInfo<Value>& args) {
               uv_fs_statfs,
               *path);
   } else {  // statfs(path, use_bigint)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
     FSReqWrapSync req_wrap_sync("statfs", *path);
     FS_SYNC_TRACE_BEGIN(statfs);
     int result =
@@ -1371,9 +1419,8 @@ static void Symlink(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsInt32());
   int flags = args[2].As<Int32>()->Value();
 
-  if (argc > 3) {  // symlink(target, path, flags, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // symlink(target, path, flags, req)
     FS_ASYNC_TRACE_BEGIN2(UV_FS_SYMLINK,
                           req_wrap_async,
                           "target",
@@ -1420,26 +1467,25 @@ static void Link(const FunctionCallbackInfo<Value>& args) {
 
   const auto dest_view = dest.ToStringView();
 
-  if (argc > 2) {  // link(src, dest, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
-    // To avoid bypass the link target should be allowed to read and write
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        src_view);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        src_view);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  // To avoid bypass the link target should be allowed to read and write
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      src_view);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      src_view);
 
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        dest_view);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      dest_view);
+  if (req_wrap_async != nullptr) {  // link(src, dest, req)
     FS_ASYNC_TRACE_BEGIN2(UV_FS_LINK,
                           req_wrap_async,
                           "src",
@@ -1458,14 +1504,6 @@ static void Link(const FunctionCallbackInfo<Value>& args) {
                   *src,
                   *dest);
   } else {  // link(src, dest)
-    // To avoid bypass the link target should be allowed to read and write
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, src_view);
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, src_view);
-
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, dest_view);
     FSReqWrapSync req_wrap_sync("link", *src, *dest);
     FS_SYNC_TRACE_BEGIN(link);
     SyncCallAndThrowOnError(env, &req_wrap_sync, uv_fs_link, *src, *dest);
@@ -1488,9 +1526,8 @@ static void ReadLink(const FunctionCallbackInfo<Value>& args) {
 
   const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
 
-  if (argc > 2) {  // readlink(path, encoding, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // readlink(path, encoding, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_READLINK, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -1535,24 +1572,23 @@ static void Rename(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(*new_path);
   ToNamespacedPath(env, &new_path);
 
-  if (argc > 2) {  // rename(old_path, new_path, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        view_old_path);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        view_old_path);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        new_path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      view_old_path);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      view_old_path);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      new_path.ToStringView());
+  if (req_wrap_async != nullptr) {  // rename(old_path, new_path, req)
     FS_ASYNC_TRACE_BEGIN2(UV_FS_RENAME,
                           req_wrap_async,
                           "old_path",
@@ -1571,14 +1607,6 @@ static void Rename(const FunctionCallbackInfo<Value>& args) {
                   *old_path,
                   *new_path);
   } else {  // rename(old_path, new_path)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, view_old_path);
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, view_old_path);
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        new_path.ToStringView());
     FSReqWrapSync req_wrap_sync("rename", *old_path, *new_path);
     FS_SYNC_TRACE_BEGIN(rename);
     SyncCallAndThrowOnError(
@@ -1601,9 +1629,8 @@ static void FTruncate(const FunctionCallbackInfo<Value>& args) {
   CHECK(IsSafeJsInt(args[1]));
   const int64_t len = args[1].As<Integer>()->Value();
 
-  if (argc > 2) {  // ftruncate(fd, len, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // ftruncate(fd, len, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FTRUNCATE, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -1633,9 +1660,8 @@ static void Fdatasync(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  if (argc > 1) {  // fdatasync(fd, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 1);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 1);
+  if (req_wrap_async != nullptr) {  // fdatasync(fd, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FDATASYNC, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -1664,9 +1690,8 @@ static void Fsync(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  if (argc > 1) {
-    FSReqBase* req_wrap_async = GetReqWrap(args, 1);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 1);
+  if (req_wrap_async != nullptr) {
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FSYNC, req_wrap_async)
     AsyncCall(
         env, req_wrap_async, args, "fsync", UTF8, AfterNoArgs, uv_fs_fsync, fd);
@@ -1688,14 +1713,13 @@ static void Unlink(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(*path);
   ToNamespacedPath(env, &path);
 
-  if (argc > 1) {  // unlink(path, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 1);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 1);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // unlink(path, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_UNLINK, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -1707,10 +1731,6 @@ static void Unlink(const FunctionCallbackInfo<Value>& args) {
               uv_fs_unlink,
               *path);
   } else {  // unlink(path)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
     FSReqWrapSync req_wrap_sync("unlink", *path);
     FS_SYNC_TRACE_BEGIN(unlink);
     SyncCallAndThrowOnError(env, &req_wrap_sync, uv_fs_unlink, *path);
@@ -1730,9 +1750,8 @@ static void RMDir(const FunctionCallbackInfo<Value>& args) {
   THROW_IF_INSUFFICIENT_PERMISSIONS(
       env, permission::PermissionScope::kFileSystemWrite, path.ToStringView());
 
-  if (argc > 1) {
-    FSReqBase* req_wrap_async = GetReqWrap(args, 1);  // rmdir(path, req)
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 1);
+  if (req_wrap_async != nullptr) {  // rmdir(path, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_RMDIR, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -1750,6 +1769,41 @@ static void RMDir(const FunctionCallbackInfo<Value>& args) {
     FS_SYNC_TRACE_END(rmdir);
   }
 }
+
+#ifdef _WIN32
+static void ClearReadOnlyAttributeWHelper(const wchar_t* path) {
+  DWORD attrs = GetFileAttributesW(path);
+  if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
+    SetFileAttributesW(path, attrs & ~FILE_ATTRIBUTE_READONLY);
+  }
+}
+
+static void ClearReadOnlyAttributeW(const std::filesystem::path& path,
+                                    bool recursive) {
+  std::error_code ec;
+  auto file_status = std::filesystem::symlink_status(path, ec);
+  if (ec) return;
+
+  if (recursive &&
+      file_status.type() == std::filesystem::file_type::directory) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             path,
+             std::filesystem::directory_options::skip_permission_denied,
+             ec)) {
+      std::error_code entry_ec;
+      auto entry_status = entry.symlink_status(entry_ec);
+      if (entry_ec) continue;
+      if (entry_status.type() != std::filesystem::file_type::symlink) {
+        ClearReadOnlyAttributeWHelper(entry.path().c_str());
+      }
+    }
+  }
+
+  if (file_status.type() != std::filesystem::file_type::symlink) {
+    ClearReadOnlyAttributeWHelper(path.c_str());
+  }
+}
+#endif
 
 static void RmSync(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -1791,10 +1845,16 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
             error == std::errc::too_many_files_open ||
             error == std::errc::too_many_files_open_in_system ||
             error == std::errc::directory_not_empty ||
+#ifdef _WIN32
+            error == std::errc::permission_denied ||
+#endif
             error == std::errc::operation_not_permitted);
   };
 
   int i = 1;
+#ifdef _WIN32
+  bool cleared_readonly = false;
+#endif
 
   while (maxRetries >= 0) {
     if (recursive) {
@@ -1802,6 +1862,22 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
     } else {
       std::filesystem::remove(file_path, error);
     }
+
+#ifdef _WIN32
+    // On Windows, libc++ does not clear the read-only attribute before
+    // removing a file (unlike MSVC STL which does). Attempt to clear it
+    // manually when we get EPERM (operation_not_permitted) so that read-only
+    // files can be deleted, matching the behavior of official Node.js builds.
+    if (error == std::errc::operation_not_permitted && !cleared_readonly) {
+      cleared_readonly = true;
+      ClearReadOnlyAttributeW(file_path, recursive);
+      if (recursive) {
+        std::filesystem::remove_all(file_path, error);
+      } else {
+        std::filesystem::remove(file_path, error);
+      }
+    }
+#endif  // _WIN32
 
     if (!error || error == std::errc::no_such_file_or_directory) {
       return;
@@ -1811,8 +1887,10 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
 
     if (retryDelay > 0) {
 #ifdef _WIN32
-      Sleep(i * retryDelay / 1000);
+      // No conversion needed: Sleep() takes milliseconds.
+      Sleep(i * retryDelay);
 #else
+      // sleep() takes seconds, so convert the millisecond delay.
       sleep(i * retryDelay / 1000);
 #endif
     }
@@ -1821,7 +1899,7 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
   }
 
   // On Windows path::c_str() returns wide char, convert to std::string first.
-  std::string file_path_str = file_path.string();
+  std::string file_path_str = ConvertPathToUTF8(file_path);
   const char* path_c_str = file_path_str.c_str();
 #ifdef _WIN32
   int permission_denied_error = EPERM;
@@ -1830,14 +1908,14 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
 #endif  // !_WIN32
 
   if (error == std::errc::operation_not_permitted) {
-    std::string message = "Operation not permitted: " + file_path_str;
+    std::string message = "Operation not permitted:";
     return env->ThrowErrnoException(EPERM, "rm", message.c_str(), path_c_str);
   } else if (error == std::errc::directory_not_empty) {
-    std::string message = "Directory not empty: " + file_path_str;
+    std::string message = "Directory not empty:";
     return env->ThrowErrnoException(
         ENOTEMPTY, "rm", message.c_str(), path_c_str);
   } else if (error == std::errc::not_a_directory) {
-    std::string message = "Not a directory: " + file_path_str;
+    std::string message = "Not a directory:";
     return env->ThrowErrnoException(ENOTDIR, "rm", message.c_str(), path_c_str);
 #ifdef _AIX
   } else if (error == std::errc::permission_denied ||
@@ -1848,7 +1926,7 @@ static void RmSync(const FunctionCallbackInfo<Value>& args) {
 #else
   } else if (error == std::errc::permission_denied) {
 #endif
-    std::string message = "Permission denied: " + file_path_str;
+    std::string message = "Permission denied:";
     return env->ThrowErrnoException(
         permission_denied_error, "rm", message.c_str(), path_c_str);
   }
@@ -1895,6 +1973,9 @@ int MKDirpSync(uv_loop_t* loop,
           std::string dirname =
               next_path.substr(0, next_path.find_last_of(kPathSeparator));
           if (dirname != next_path) {
+            if (!req_wrap->continuation_data()->ShouldRetryENOENT(next_path)) {
+              return err;
+            }
             req_wrap->continuation_data()->PushPath(std::move(next_path));
             req_wrap->continuation_data()->PushPath(std::move(dirname));
           } else if (req_wrap->continuation_data()->paths().empty()) {
@@ -1976,6 +2057,10 @@ int MKDirpAsync(
               std::string dirname =
                   path.substr(0, path.find_last_of(kPathSeparator));
               if (dirname != path) {
+                if (!req_wrap->continuation_data()->ShouldRetryENOENT(path)) {
+                  req_wrap->continuation_data()->Done(err);
+                  break;
+                }
                 req_wrap->continuation_data()->PushPath(path);
                 req_wrap->continuation_data()->PushPath(std::move(dirname));
               } else if (req_wrap->continuation_data()->paths().empty()) {
@@ -2048,9 +2133,8 @@ static void MKDir(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsBoolean());
   bool mkdirp = args[2]->IsTrue();
 
-  if (argc > 3) {  // mkdir(path, mode, recursive, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // mkdir(path, mode, recursive, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_UNLINK, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -2101,14 +2185,13 @@ static void RealPath(const FunctionCallbackInfo<Value>& args) {
 
   const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
 
-  if (argc > 2) {  // realpath(path, encoding, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // realpath(path, encoding, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_REALPATH, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -2120,8 +2203,6 @@ static void RealPath(const FunctionCallbackInfo<Value>& args) {
               uv_fs_realpath,
               *path);
   } else {  // realpath(path, encoding, undefined, ctx)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
     FSReqWrapSync req_wrap_sync("realpath", *path);
     FS_SYNC_TRACE_BEGIN(realpath);
     int err =
@@ -2176,14 +2257,13 @@ static void ReadDir(const FunctionCallbackInfo<Value>& args) {
 
   bool with_types = args[2]->IsTrue();
 
-  if (argc > 3) {  // readdir(path, encoding, withTypes, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // readdir(path, encoding, withTypes, req)
     req_wrap_async->set_with_file_types(with_types);
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_SCANDIR, req_wrap_async, "path", TRACE_STR_COPY(*path))
@@ -2197,8 +2277,6 @@ static void ReadDir(const FunctionCallbackInfo<Value>& args) {
               *path,
               0 /*flags*/);
   } else {  // readdir(path, encoding, withTypes)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
     FSReqWrapSync req_wrap_sync("scandir", *path);
     FS_SYNC_TRACE_BEGIN(readdir);
     int err = SyncCallAndThrowOnError(
@@ -2241,6 +2319,481 @@ static void ReadDir(const FunctionCallbackInfo<Value>& args) {
       args.GetReturnValue().Set(Array::New(isolate, result, arraysize(result)));
     } else {
       args.GetReturnValue().Set(names);
+    }
+  }
+}
+
+namespace {
+
+// Recursive readdir.
+//
+// The result is breadth-first: every entry of the root, then every entry of
+// the first subdirectory, and so on, each directory's entries in the order
+// uv_fs_scandir() reports them. Symbolic links to directories are followed,
+// see https://github.com/nodejs/node/issues/52663.
+//
+// The tree is walked by one or more threads that share a queue of
+// directories, and the breadth-first order is derived from the tree
+// afterwards, so it does not depend on which thread scanned what. The walk
+// does not touch the Environment; lib does not use it when the permission
+// model is enabled, as every directory would need a check on the main thread.
+
+// Maps an st_mode to the uv_dirent_type_t that uv_fs_scandir would report.
+uv_dirent_type_t DirentTypeFromMode(uint64_t mode) {
+  switch (mode & S_IFMT) {
+    case S_IFREG:
+      return UV_DIRENT_FILE;
+    case S_IFDIR:
+      return UV_DIRENT_DIR;
+    case S_IFLNK:
+      return UV_DIRENT_LINK;
+    case S_IFCHR:
+      return UV_DIRENT_CHAR;
+#ifdef S_IFIFO
+    case S_IFIFO:
+      return UV_DIRENT_FIFO;
+#endif
+#ifdef S_IFSOCK
+    case S_IFSOCK:
+      return UV_DIRENT_SOCKET;
+#endif
+#ifdef S_IFBLK
+    case S_IFBLK:
+      return UV_DIRENT_BLOCK;
+#endif
+    default:
+      return UV_DIRENT_UNKNOWN;
+  }
+}
+
+// Appends `name` to `path`, with a separator unless `path` already ends in
+// one (so that a root of "dir/" does not turn into "dir//name").
+void AppendPathComponent(std::string* path, std::string_view name) {
+  if (name.empty()) return;
+  if (!path->empty()) {
+#ifdef _WIN32
+    const bool has_separator = path->back() == '\\' || path->back() == '/';
+    if (!has_separator) *path += '\\';
+#else
+    const bool has_separator = path->back() == '/';
+    if (!has_separator) *path += '/';
+#endif
+  }
+  path->append(name);
+}
+
+struct ReadDirEntry {
+  // Offset and length of the name within ScannedDirectory::names.
+  uint32_t name_offset;
+  uint32_t name_length;
+  uint8_t type;  // A uv_dirent_type_t.
+  // Whether the walk descends into this entry (a directory, or a symbolic
+  // link to one).
+  bool is_dir = false;
+};
+
+// One directory of the tree.
+struct ScannedDirectory {
+  explicit ScannedDirectory(std::string relative)
+      : relative(std::move(relative)) {}
+
+  std::string_view name(const ReadDirEntry& entry) const {
+    return std::string_view(names).substr(entry.name_offset, entry.name_length);
+  }
+
+  // Path relative to the root; empty for the root itself.
+  const std::string relative;
+  // The entry names, concatenated.
+  std::string names;
+  std::vector<ReadDirEntry> entries;
+  // Indices (into RecursiveReadDir::dirs()) of the subdirectories, in entry
+  // order.
+  std::vector<uint32_t> subdirs;
+};
+
+class RecursiveReadDir {
+ public:
+  explicit RecursiveReadDir(std::string root) : root_(std::move(root)) {
+    dirs_.push_back(std::make_unique<ScannedDirectory>(""));
+  }
+
+  // Scans directories until none are left or an error occurred. May be
+  // called from several threads at once, which then share the work.
+  void Run();
+  void RunWithHelpers(int max_helpers);
+
+  // The following are only valid once every Run() has returned.
+
+  // 0 or a uv error code; error_path() is then the directory that failed.
+  int error() const { return error_; }
+  const std::string& error_path() const { return error_path_; }
+
+  const std::vector<std::unique_ptr<ScannedDirectory>>& dirs() const {
+    return dirs_;
+  }
+
+  // The indices of dirs() in breadth-first order.
+  std::vector<uint32_t> BreadthFirstOrder() const {
+    std::vector<uint32_t> order;
+    order.reserve(dirs_.size());
+    order.push_back(0);
+    for (size_t i = 0; i < order.size(); i++) {
+      for (uint32_t subdir : dirs_[order[i]]->subdirs) order.push_back(subdir);
+    }
+    return order;
+  }
+
+ private:
+  // Reads the directory at `path` into `dir`, resolving the type of entries
+  // where needed, and creates the ScannedDirectory of each subdirectory.
+  static int Scan(const std::string& path,
+                  ScannedDirectory* dir,
+                  std::vector<std::unique_ptr<ScannedDirectory>>* subdirs);
+
+  // Called with the lock held.
+  void MaybeStartHelper();
+
+  // The number of entries a walk has to have seen, with directories still
+  // to scan, before RunWithHelpers() starts a helper thread.
+  static constexpr size_t kHelperThreshold = 1024;
+
+  const std::string root_;
+
+  Mutex mutex_;
+  ConditionVariable cv_;
+  // Directories in the order they were found; the first next_ have been or
+  // are being scanned by one of the active_ threads.
+  std::vector<std::unique_ptr<ScannedDirectory>> dirs_;
+  size_t next_ = 0;
+  size_t active_ = 0;
+  size_t entries_seen_ = 0;
+  int error_ = 0;
+  std::string error_path_;
+  size_t max_helpers_ = 0;
+  std::vector<uv_thread_t> helpers_;
+};
+
+void RecursiveReadDir::RunWithHelpers(int max_helpers) {
+  max_helpers_ = max_helpers;
+  Run();
+  for (uv_thread_t& helper : helpers_) CHECK_EQ(uv_thread_join(&helper), 0);
+}
+
+void RecursiveReadDir::Run() {
+  std::vector<std::unique_ptr<ScannedDirectory>> subdirs;
+  std::string path;
+  Mutex::ScopedLock lock(mutex_);
+  for (;;) {
+    while (next_ == dirs_.size() && active_ > 0 && error_ == 0) {
+      cv_.Wait(lock);
+    }
+    if (next_ == dirs_.size() || error_ != 0) return;
+
+    ScannedDirectory* dir = dirs_[next_++].get();
+    active_++;
+    int r;
+    {
+      Mutex::ScopedUnlock unlock(lock);
+      path = root_;
+      AppendPathComponent(&path, dir->relative);
+      r = Scan(path, dir, &subdirs);
+    }
+    active_--;
+
+    if (r != 0) {
+      if (error_ == 0) {
+        error_ = r;
+        error_path_ = std::move(path);
+      }
+    } else {
+      for (std::unique_ptr<ScannedDirectory>& subdir : subdirs) {
+        dir->subdirs.push_back(static_cast<uint32_t>(dirs_.size()));
+        dirs_.push_back(std::move(subdir));
+      }
+      entries_seen_ += dir->entries.size();
+    }
+    // Wake the others if there is new work, or nothing left to wait for.
+    if (!subdirs.empty() || active_ == 0 || error_ != 0) cv_.Broadcast(lock);
+    subdirs.clear();
+    MaybeStartHelper();
+  }
+}
+
+void RecursiveReadDir::MaybeStartHelper() {
+  if (helpers_.size() >= max_helpers_ || entries_seen_ < kHelperThreshold ||
+      dirs_.size() - next_ < 2) {
+    return;
+  }
+  uv_thread_t helper;
+  int r = uv_thread_create(
+      &helper,
+      [](void* arg) { static_cast<RecursiveReadDir*>(arg)->Run(); },
+      this);
+  if (r == 0) {
+    helpers_.push_back(helper);
+  } else {
+    max_helpers_ = 0;  // Carry on alone.
+  }
+}
+
+int RecursiveReadDir::Scan(
+    const std::string& path,
+    ScannedDirectory* dir,
+    std::vector<std::unique_ptr<ScannedDirectory>>* subdirs) {
+  uv_fs_t req;
+  int r = uv_fs_scandir(nullptr, &req, path.c_str(), 0, nullptr);
+  if (r >= 0) {
+    dir->entries.reserve(r);
+    uv_dirent_t ent;
+    while ((r = uv_fs_scandir_next(&req, &ent)) == 0) {
+      const size_t length = strlen(ent.name);
+      dir->entries.push_back({static_cast<uint32_t>(dir->names.size()),
+                              static_cast<uint32_t>(length),
+                              static_cast<uint8_t>(ent.type)});
+      dir->names.append(ent.name, length);
+    }
+    if (r == UV_EOF) r = 0;
+  }
+  uv_fs_req_cleanup(&req);
+  if (r != 0) return r;
+
+  std::string child;
+  for (ReadDirEntry& entry : dir->entries) {
+    const std::string_view name = dir->name(entry);
+    if (entry.type == UV_DIRENT_UNKNOWN || entry.type == UV_DIRENT_LINK) {
+      // The file system did not report a type, or the entry is a symbolic
+      // link that may point at a directory.
+      child = path;
+      AppendPathComponent(&child, name);
+      if (entry.type == UV_DIRENT_UNKNOWN) {
+        if (uv_fs_lstat(nullptr, &req, child.c_str(), nullptr) == 0) {
+          entry.type = DirentTypeFromMode(req.statbuf.st_mode);
+        }
+        uv_fs_req_cleanup(&req);
+      }
+      if (entry.type == UV_DIRENT_LINK) {
+        if (uv_fs_stat(nullptr, &req, child.c_str(), nullptr) == 0) {
+          entry.is_dir = S_ISDIR(req.statbuf.st_mode);
+        }
+        uv_fs_req_cleanup(&req);
+      }
+    }
+    if (entry.type == UV_DIRENT_DIR) entry.is_dir = true;
+
+    if (entry.is_dir) {
+      std::string relative = dir->relative;
+      AppendPathComponent(&relative, name);
+      subdirs->push_back(
+          std::make_unique<ScannedDirectory>(std::move(relative)));
+    }
+  }
+  return 0;
+}
+
+// Without file types the result is an array of paths relative to the root.
+// With file types it is [names, types, counts, dirs]: `types` is a
+// Uint8Array with the uv_dirent_type_t of every entry, `dirs` the relative
+// path of every directory in the order their entries appear, and `counts` a
+// Uint32Array with the number of entries in each of those directories. See
+// getRecursiveDirents() in lib/internal/fs/utils.js.
+MaybeLocal<Value> MarshalRecursiveReadDir(Isolate* isolate,
+                                          const RecursiveReadDir& walk,
+                                          enum encoding encoding,
+                                          bool with_types) {
+  EscapableHandleScope scope(isolate);
+  const std::vector<uint32_t> order = walk.BreadthFirstOrder();
+
+  LocalVector<Value> names(isolate);
+  LocalVector<Value> dirs(isolate);
+  std::vector<uint8_t> types;
+  std::vector<uint32_t> counts;
+  std::string path;
+  for (uint32_t index : order) {
+    const ScannedDirectory& dir = *walk.dirs()[index];
+    for (const ReadDirEntry& entry : dir.entries) {
+      std::string_view data = dir.name(entry);
+      if (!with_types) {
+        path = dir.relative;
+        AppendPathComponent(&path, data);
+        data = path;
+      }
+      Local<Value> name;
+      if (!StringBytes::Encode(isolate, data.data(), data.size(), encoding)
+               .ToLocal(&name)) {
+        return MaybeLocal<Value>();
+      }
+      names.push_back(name);
+      types.push_back(entry.type);
+    }
+    if (!with_types) continue;
+    counts.push_back(static_cast<uint32_t>(dir.entries.size()));
+    Local<Value> relative;
+    if (!StringBytes::Encode(
+             isolate, dir.relative.data(), dir.relative.size(), encoding)
+             .ToLocal(&relative)) {
+      return MaybeLocal<Value>();
+    }
+    dirs.push_back(relative);
+  }
+
+  if (!with_types) {
+    return scope.Escape(Array::New(isolate, names.data(), names.size()));
+  }
+
+  // One ArrayBuffer holding the types, then (4-byte aligned) the counts.
+  const size_t counts_offset = (types.size() + 3) & ~static_cast<size_t>(3);
+  Local<ArrayBuffer> ab = ArrayBuffer::New(
+      isolate, counts_offset + counts.size() * sizeof(uint32_t));
+  char* bytes = static_cast<char*>(ab->Data());
+  memcpy(bytes, types.data(), types.size());
+  memcpy(
+      bytes + counts_offset, counts.data(), counts.size() * sizeof(uint32_t));
+
+  Local<Value> parts[] = {
+      Array::New(isolate, names.data(), names.size()),
+      Uint8Array::New(ab, 0, types.size()),
+      Uint32Array::New(ab, counts_offset, counts.size()),
+      Array::New(isolate, dirs.data(), dirs.size()),
+  };
+  return scope.Escape(Array::New(isolate, parts, arraysize(parts)));
+}
+
+// The number of thread pool work items that share an asynchronous walk, and
+// the number of helper threads a synchronous walk may start.
+constexpr int kReadDirRecursiveWorkers = 4;
+constexpr int kReadDirRecursiveSyncHelpers = kReadDirRecursiveWorkers - 1;
+
+// An asynchronous recursive readdir: the walk, and the request it settles
+// once every worker has finished.
+class ReadDirRecursiveRequest {
+ public:
+  ReadDirRecursiveRequest(Environment* env,
+                          FSReqBase* req_wrap,
+                          std::string path,
+                          enum encoding encoding,
+                          bool with_types,
+                          int workers)
+      : env_(env),
+        req_wrap_(req_wrap),
+        walk_(std::move(path)),
+        encoding_(encoding),
+        with_types_(with_types),
+        pending_(workers) {}
+
+  RecursiveReadDir* walk() { return &walk_; }
+
+  // Called on the main thread when a worker is done.
+  void OnWorkerDone(int status) {
+    CHECK(status == 0 || status == UV_ECANCELED);
+    if (status == UV_ECANCELED) cancelled_ = true;
+    if (--pending_ > 0) return;
+
+    Isolate* isolate = env_->isolate();
+    HandleScope handle_scope(isolate);
+    Context::Scope context_scope(env_->context());
+
+    // Release the request even if the environment is shutting down.
+    BaseObjectPtr<FSReqBase> req_wrap = std::move(req_wrap_);
+    req_wrap->Detach();
+
+    FS_ASYNC_TRACE_END1(UV_FS_SCANDIR, req_wrap.get(), "result", walk_.error())
+    if (cancelled_ || !env_->can_call_into_js()) return;
+
+    if (walk_.error() != 0) {
+      return req_wrap->Reject(UVException(isolate,
+                                          walk_.error(),
+                                          "scandir",
+                                          nullptr,
+                                          walk_.error_path().c_str()));
+    }
+
+    ResolveOrReject(req_wrap.get(), [&]() {
+      return MarshalRecursiveReadDir(isolate, walk_, encoding_, with_types_);
+    });
+  }
+
+ private:
+  Environment* const env_;
+  BaseObjectPtr<FSReqBase> req_wrap_;
+  RecursiveReadDir walk_;
+  const enum encoding encoding_;
+  const bool with_types_;
+  int pending_;
+  bool cancelled_ = false;
+};
+
+class ReadDirRecursiveWork final : public ThreadPoolWork {
+ public:
+  ReadDirRecursiveWork(Environment* env,
+                       std::shared_ptr<ReadDirRecursiveRequest> request)
+      : ThreadPoolWork(env, ThreadPoolWorkType::kReadDirRecursive),
+        request_(std::move(request)) {}
+
+  void DoThreadPoolWork() override { request_->walk()->Run(); }
+
+  void AfterThreadPoolWork(int status) override {
+    std::unique_ptr<ReadDirRecursiveWork> self(this);
+    request_->OnWorkerDone(status);
+  }
+
+ private:
+  std::shared_ptr<ReadDirRecursiveRequest> request_;
+};
+
+}  // namespace
+
+// readdirRecursive(path, encoding, withTypes[, req])
+static void ReadDirRecursive(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  Isolate* isolate = env->isolate();
+
+  const int argc = args.Length();
+  CHECK_GE(argc, 3);
+
+  BufferValue path(isolate, args[0]);
+  CHECK_NOT_NULL(*path);
+  ToNamespacedPath(env, &path);
+
+  const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
+
+  bool with_types = args[2]->IsTrue();
+
+  // Every directory would need a permission check, and only the main thread
+  // can do those: lib walks the tree in JS when the permission model is on.
+  CHECK(!env->permission()->enabled());
+
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async !=
+      nullptr) {  // readdirRecursive(path, encoding, withTypes, req)
+    req_wrap_async->Init("scandir", nullptr, 0, encoding);
+    FS_ASYNC_TRACE_BEGIN1(
+        UV_FS_SCANDIR, req_wrap_async, "path", TRACE_STR_COPY(*path))
+    auto request =
+        std::make_shared<ReadDirRecursiveRequest>(env,
+                                                  req_wrap_async,
+                                                  path.ToString(),
+                                                  encoding,
+                                                  with_types,
+                                                  kReadDirRecursiveWorkers);
+    for (int i = 0; i < kReadDirRecursiveWorkers; i++) {
+      (new ReadDirRecursiveWork(env, request))->ScheduleWork();
+    }
+  } else {  // readdirRecursive(path, encoding, withTypes)
+    env->PrintSyncTrace();
+    FS_SYNC_TRACE_BEGIN(readdir);
+    RecursiveReadDir walk(path.ToString());
+    walk.RunWithHelpers(kReadDirRecursiveSyncHelpers);
+    FS_SYNC_TRACE_END(readdir);
+
+    if (walk.error() != 0) {
+      return env->ThrowUVException(
+          walk.error(), "scandir", nullptr, walk.error_path().c_str());
+    }
+
+    Local<Value> value;
+    if (MarshalRecursiveReadDir(isolate, walk, encoding, with_types)
+            .ToLocal(&value)) {
+      args.GetReturnValue().Set(value);
     }
   }
 }
@@ -2324,9 +2877,8 @@ static void Open(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsInt32());
   const int mode = args[2].As<Int32>()->Value();
 
-  if (argc > 3) {  // open(path, flags, mode, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // open(path, flags, mode, req)
     if (AsyncCheckOpenPermissions(env, req_wrap_async, path, flags).IsNothing())
       return;
     req_wrap_async->set_is_plain_open(true);
@@ -2436,19 +2988,18 @@ static void CopyFile(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(*dest);
   ToNamespacedPath(env, &dest);
 
-  if (argc > 3) {  // copyFile(src, dest, flags, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemRead,
-        src.ToStringView());
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        dest.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemRead,
+      src.ToStringView());
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      dest.ToStringView());
+  if (req_wrap_async != nullptr) {  // copyFile(src, dest, flags, req)
     FS_ASYNC_TRACE_BEGIN2(UV_FS_COPYFILE,
                           req_wrap_async,
                           "src",
@@ -2468,12 +3019,6 @@ static void CopyFile(const FunctionCallbackInfo<Value>& args) {
                   *dest,
                   flags);
   } else {  // copyFile(src, dest, flags)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, src.ToStringView());
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        dest.ToStringView());
     FSReqWrapSync req_wrap_sync("copyfile", *src, *dest);
     FS_SYNC_TRACE_BEGIN(copyfile);
     SyncCallAndThrowOnError(
@@ -2593,9 +3138,8 @@ static void WriteBuffers(const FunctionCallbackInfo<Value>& args) {
     iovs[i] = uv_buf_init(Buffer::Data(chunk), Buffer::Length(chunk));
   }
 
-  if (argc > 3) {  // writeBuffers(fd, chunks, pos, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // writeBuffers(fd, chunks, pos, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_WRITE, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -2851,9 +3395,8 @@ static void Read(const FunctionCallbackInfo<Value>& args) {
   char* buf = buffer_data + off;
   uv_buf_t uvbuf = uv_buf_init(buf, len);
 
-  if (argc > 5) {  // read(fd, buffer, offset, len, pos, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 5);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 5);
+  if (req_wrap_async != nullptr) {  // read(fd, buffer, offset, len, pos, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_READ, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -2924,9 +3467,19 @@ static void ReadFileUtf8(const FunctionCallbackInfo<Value>& args) {
     uv_fs_req_cleanup(&req);
   });
 
+  // Past the first 8 KiB, read into one heap buffer sized from fstat(); the
+  // size is only a hint, reading continues until read() reports EOF.
   std::string result{};
   char buffer[8192];
   uv_buf_t buf = uv_buf_init(buffer, sizeof(buffer));
+
+  char* big = nullptr;
+  size_t big_len = 0;
+  size_t big_cap = 0;
+  bool sized = false;
+  auto free_big = OnScopeLeave([&big]() { free(big); });
+  constexpr size_t kMinChunk = 64 * 1024;
+  constexpr size_t kMaxChunk = 8 * 1024 * 1024;
 
   FS_SYNC_TRACE_BEGIN(read);
   while (true) {
@@ -2940,17 +3493,505 @@ static void ReadFileUtf8(const FunctionCallbackInfo<Value>& args) {
     if (r <= 0) {
       break;
     }
-    result.append(buf.base, r);
+    if (big == nullptr) {
+      result.append(buf.base, r);
+      if (static_cast<size_t>(r) < sizeof(buffer)) {
+        continue;
+      }
+      // Switch to the heap buffer. A pipe can deliver more than kMinChunk in
+      // short reads before the first full one.
+      uv_fs_req_cleanup(&req);
+      big_cap = std::max(kMinChunk, result.size());
+      big = UncheckedMalloc<char>(big_cap);
+      if (big == nullptr) {
+        FS_SYNC_TRACE_END(read);
+        return THROW_ERR_MEMORY_ALLOCATION_FAILED(env);
+      }
+      memcpy(big, result.data(), result.size());
+      big_len = result.size();
+      result = std::string();
+    } else {
+      big_len += static_cast<size_t>(r);
+    }
+    if (big_len == big_cap) {
+      // +1 leaves room for the read() that reports EOF.
+      size_t new_cap =
+          big_cap + std::min(kMaxChunk, std::max(kMinChunk, big_cap));
+      if (!sized) {
+        sized = true;
+        uv_fs_req_cleanup(&req);
+        uv_fs_t stat_req;
+        if (uv_fs_fstat(nullptr, &stat_req, file, nullptr) == 0) {
+          const uv_stat_t* const st =
+              static_cast<const uv_stat_t*>(stat_req.ptr);
+          if ((st->st_mode & S_IFMT) == S_IFREG &&
+              static_cast<uint64_t>(st->st_size) > big_len &&
+              static_cast<uint64_t>(st->st_size) <
+                  static_cast<uint64_t>(v8::String::kMaxLength)) {
+            new_cap = static_cast<size_t>(st->st_size) + 1;
+          }
+        }
+        uv_fs_req_cleanup(&stat_req);
+      }
+      char* const grown = UncheckedRealloc<char>(big, new_cap);
+      if (grown == nullptr) {
+        FS_SYNC_TRACE_END(read);
+        return THROW_ERR_MEMORY_ALLOCATION_FAILED(env);
+      }
+      big = grown;
+      big_cap = new_cap;
+    }
+    buf = uv_buf_init(big + big_len, std::min(kMaxChunk, big_cap - big_len));
   }
   FS_SYNC_TRACE_END(read);
 
   Local<Value> val;
-  if (!ToV8Value(env->context(), result, isolate).ToLocal(&val)) {
+  const std::string_view content = big != nullptr
+                                       ? std::string_view(big, big_len)
+                                       : std::string_view(result);
+  if (!ToV8Value(env->context(), content, isolate).ToLocal(&val)) {
     return;
   }
 
   args.GetReturnValue().Set(val);
 }
+
+// Reads a whole (small) file in ONE thread pool round trip -- open + fstat +
+// read + close -- instead of one round trip per step, which is what dominates
+// fs.readFile() for the typical small file and multiplies thread pool
+// contention when many files are read at once. Files whose size exceeds
+// `limit`, and files that are not regular files (a FIFO or a device may never
+// reach EOF), are not read here: the job hands the open fd and the size back
+// so that the caller continues with the chunked reader (which stays fair and
+// abortable between chunks); it then only saved the fstat() round trip.
+//
+// JS: const job = new ReadFileJob(path, flags, limit, trackFd);
+//     job.ondone = (err, buffer, fd, size, closeErr) => {...}; job.run(path);
+// Exactly one of these outcomes is reported:
+//   err            -- open/fstat/read failed (any fd opened here was closed);
+//   fd >= 0, size  -- file is larger than `limit`, or not a regular file and
+//                     size is 0: caller owns fd now (it is registered as an
+//                     unmanaged fd iff trackFd, i.e. when the caller will
+//                     close it through fs.close() rather than a FileHandle);
+//   buffer         -- the whole content; closeErr set if only close() failed.
+class ReadFileJob final : public AsyncWrap, public ThreadPoolWork {
+ public:
+  static void New(const FunctionCallbackInfo<Value>& args) {
+    CHECK(args.IsConstructCall());
+    Environment* env = Environment::GetCurrent(args);
+    CHECK_GE(args.Length(), 3);
+    BufferValue path(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*path);
+    ToNamespacedPath(env, &path);
+    CHECK(args[1]->IsInt32());
+    CHECK(args[2]->IsNumber());
+    const int flags = args[1].As<Int32>()->Value();
+    const double limit = args[2].As<Number>()->Value();
+    const bool track_fd = args.Length() > 3 && args[3]->IsTrue();
+    new ReadFileJob(env,
+                    args.This(),
+                    path.ToString(),
+                    flags,
+                    limit < 0 ? 0 : static_cast<uint64_t>(limit),
+                    track_fd);
+  }
+
+  // Returns undefined when the job was scheduled, or the ERR_ACCESS_DENIED
+  // error the asynchronous open() would have delivered through its request
+  // (nothing is scheduled then; the caller passes it to the callback).
+  static void Run(const FunctionCallbackInfo<Value>& args) {
+    ReadFileJob* job;
+    ASSIGN_OR_RETURN_UNWRAP(&job, args.This());
+    Environment* env = job->AsyncWrap::env();
+    CHECK(!job->scheduled_);
+    BufferValue path(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*path);
+    ToNamespacedPath(env, &path);
+    Local<Value> access_error;
+    if (OpenPermissionError(env, path, job->flags_).ToLocal(&access_error)) {
+      args.GetReturnValue().Set(access_error);
+      return;
+    }
+    job->scheduled_ = true;
+    // Keep the wrapper alive while the work is in flight.
+    job->ClearWeak();
+    FS_ASYNC_TRACE_BEGIN0(UV_FS_READ, job)
+    job->ScheduleWork();
+  }
+
+  void DoThreadPoolWork() override {
+    uv_fs_t req;
+    int fd = uv_fs_open(nullptr, &req, path_.c_str(), flags_, 0666, nullptr);
+    uv_fs_req_cleanup(&req);
+    if (fd < 0) return Fail("open", fd);
+
+    int rc = uv_fs_fstat(nullptr, &req, fd, nullptr);
+    if (rc < 0) {
+      uv_fs_req_cleanup(&req);
+      Fail("fstat", rc);
+      CloseQuietly(fd);
+      return;
+    }
+    const uv_stat_t* const st = static_cast<const uv_stat_t*>(req.ptr);
+    const bool regular = (st->st_mode & S_IFMT) == S_IFREG;
+    const uint64_t size = regular ? static_cast<uint64_t>(st->st_size) : 0;
+    uv_fs_req_cleanup(&req);
+
+    if (size > limit_ || !regular) {
+      // Too large to read in one go here, or possibly endless: hand the fd
+      // back.
+      fd_ = fd;
+      size_ = size;
+      return;
+    }
+
+    // Known size: read exactly that much (like the chunked reader, stop when
+    // it has been read or at EOF, whichever comes first). Unknown size (0,
+    // e.g. procfs): grow until EOF.
+    size_t cap = size > 0 ? static_cast<size_t>(size) : kUnknownSizeChunk;
+    data_ = UncheckedMalloc<char>(cap);
+    if (data_ == nullptr) {
+      Fail("read", UV_ENOMEM);
+      CloseQuietly(fd);
+      return;
+    }
+    while (true) {
+      if (len_ == cap) {
+        if (size > 0) break;  // Read all of the announced size.
+        // A file that claims size 0 keeps growing until EOF (or ENOMEM),
+        // like the chunked reader's buffer list did.
+        size_t new_cap = cap * 2;
+        char* grown = UncheckedRealloc<char>(data_, new_cap);
+        if (grown == nullptr) {
+          Fail("read", UV_ENOMEM);
+          break;
+        }
+        data_ = grown;
+        cap = new_cap;
+      }
+      uv_buf_t buf = uv_buf_init(data_ + len_,
+                                 static_cast<unsigned int>(std::min<size_t>(
+                                     cap - len_, kMaxReadChunk)));
+      int r = uv_fs_read(nullptr, &req, fd, &buf, 1, -1, nullptr);
+      uv_fs_req_cleanup(&req);
+      if (r < 0) {
+        Fail("read", r);
+        break;
+      }
+      if (r == 0) break;
+      len_ += static_cast<size_t>(r);
+    }
+
+    rc = uv_fs_close(nullptr, &req, fd, nullptr);
+    uv_fs_req_cleanup(&req);
+    if (rc < 0) close_error_ = rc;
+    if (error_ != 0) {
+      free(data_);
+      data_ = nullptr;
+      len_ = 0;
+    } else if (cap - len_ >= 4096) {
+      // Do not retain the slack of a size-0 (grown) or short file.
+      char* shrunk = UncheckedRealloc<char>(data_, len_ > 0 ? len_ : 1);
+      if (shrunk != nullptr) data_ = shrunk;
+    }
+  }
+
+  void AfterThreadPoolWork(int status) override {
+    Environment* env = AsyncWrap::env();
+    std::unique_ptr<ReadFileJob> self(this);
+    CHECK(status == 0 || status == UV_ECANCELED);
+    FS_ASYNC_TRACE_END0(UV_FS_READ, this)
+    if (status == UV_ECANCELED) {
+      if (fd_ >= 0) CloseQuietly(fd_);
+      return;
+    }
+    if (!env->can_call_into_js()) {
+      if (fd_ >= 0) CloseQuietly(fd_);
+      return;
+    }
+    HandleScope handle_scope(env->isolate());
+    Context::Scope context_scope(env->context());
+    Isolate* isolate = env->isolate();
+
+    Local<Value> argv[5] = {Null(isolate),
+                            Undefined(isolate),
+                            Integer::New(isolate, -1),
+                            Undefined(isolate),
+                            Undefined(isolate)};
+    if (error_ != 0) {
+      argv[0] = UVException(isolate, error_, syscall_, nullptr, path_.c_str());
+    } else if (fd_ >= 0) {
+      if (track_fd_) env->AddUnmanagedFd(fd_);
+      argv[2] = Integer::New(isolate, fd_);
+      argv[3] = Number::New(isolate, static_cast<double>(size_));
+      fd_ = -1;
+    } else {
+      Local<Object> buffer;
+      char* data = data_;
+      data_ = nullptr;
+      if (!Buffer::New(env, data, len_).ToLocal(&buffer)) {
+        // Buffer::New took ownership of data either way.
+        argv[0] = ERR_MEMORY_ALLOCATION_FAILED(isolate);
+      } else {
+        argv[1] = buffer;
+      }
+      if (close_error_ != 0) {
+        argv[4] = UVException(isolate, close_error_, "close");
+      }
+    }
+    MakeCallback(env->ondone_string(), arraysize(argv), argv);
+  }
+
+  ~ReadFileJob() override {
+    free(data_);
+    if (fd_ >= 0) CloseQuietly(fd_);
+  }
+
+  bool IsNotIndicativeOfMemoryLeakAtExit() const override { return true; }
+  SET_NO_MEMORY_INFO()
+  SET_MEMORY_INFO_NAME(ReadFileJob)
+  SET_SELF_SIZE(ReadFileJob)
+
+ private:
+  friend class WriteFileJob;
+  static constexpr size_t kUnknownSizeChunk = 64 * 1024;
+  static constexpr size_t kMaxReadChunk = 256 * 1024 * 1024;
+
+  ReadFileJob(Environment* env,
+              Local<Object> object,
+              std::string&& path,
+              int flags,
+              uint64_t limit,
+              bool track_fd)
+      : AsyncWrap(env, object, AsyncWrap::PROVIDER_FSREQCALLBACK),
+        ThreadPoolWork(env, ThreadPoolWorkType::kFsReadFile),
+        path_(std::move(path)),
+        limit_(limit),
+        flags_(flags),
+        track_fd_(track_fd) {
+    MakeWeak();
+  }
+
+  void Fail(const char* syscall, int error) {
+    syscall_ = syscall;
+    error_ = error;
+  }
+
+  // The permission checks AsyncCheckOpenPermissions() performs for open(),
+  // producing the error object instead of rejecting a request wrap.
+  static MaybeLocal<Value> OpenPermissionError(Environment* env,
+                                               const BufferValue& path,
+                                               int flags) {
+    if (!env->permission()->enabled()) [[likely]]
+      return {};
+    const int rwflags =
+        flags & (UV_FS_O_RDONLY | UV_FS_O_WRONLY | UV_FS_O_RDWR);
+    const int write_as_side_effect =
+        flags &
+        (UV_FS_O_APPEND | UV_FS_O_CREAT | UV_FS_O_TRUNC | UV_FS_O_TEMPORARY);
+    const auto path_view = path.ToStringView();
+    auto denied = [&](permission::PermissionScope scope) -> MaybeLocal<Value> {
+      if (env->permission()->is_granted(env, scope, path_view) ||
+          env->permission()->warning_only()) {
+        return {};
+      }
+      Local<Value> err;
+      if (permission::CreateAccessDeniedError(env, scope, path_view)
+              .ToLocal(&err)) {
+        return err;
+      }
+      return Integer::New(env->isolate(), UV_EACCES);
+    };
+    if (rwflags != UV_FS_O_WRONLY) {
+      MaybeLocal<Value> err =
+          denied(permission::PermissionScope::kFileSystemRead);
+      if (!err.IsEmpty()) return err;
+    }
+    if (rwflags != UV_FS_O_RDONLY || write_as_side_effect) {
+      MaybeLocal<Value> err =
+          denied(permission::PermissionScope::kFileSystemWrite);
+      if (!err.IsEmpty()) return err;
+    }
+    return {};
+  }
+
+  static void CloseQuietly(int fd) {
+    uv_fs_t req;
+    uv_fs_close(nullptr, &req, fd, nullptr);
+    uv_fs_req_cleanup(&req);
+  }
+
+  // Inputs.
+  std::string path_;
+  uint64_t limit_;
+  int flags_;
+  bool track_fd_;
+  bool scheduled_ = false;
+  // Results (written on the thread pool thread, read on the loop thread).
+  uint64_t size_ = 0;
+  size_t len_ = 0;
+  char* data_ = nullptr;
+  const char* syscall_ = nullptr;
+  int error_ = 0;
+  int close_error_ = 0;
+  int fd_ = -1;
+};
+
+// Writes a whole buffer to a file in ONE thread pool round trip -- open +
+// write (until everything is written) + close -- for fs.writeFile() and
+// fs.promises.writeFile() with a path, which otherwise pay one round trip per
+// step.
+//
+// JS: const job = new WriteFileJob(path, flags, mode, buffer);
+//     job.ondone = (err) => {...}; job.run(path);
+// `err` carries the syscall that failed ('open', 'write' or 'close'); the file
+// descriptor opened here is always closed.
+class WriteFileJob final : public AsyncWrap, public ThreadPoolWork {
+ public:
+  static void New(const FunctionCallbackInfo<Value>& args) {
+    CHECK(args.IsConstructCall());
+    Environment* env = Environment::GetCurrent(args);
+    CHECK_GE(args.Length(), 4);
+    BufferValue path(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*path);
+    ToNamespacedPath(env, &path);
+    CHECK(args[1]->IsInt32());
+    CHECK(args[2]->IsInt32());
+    CHECK(args[3]->IsArrayBufferView());
+    new WriteFileJob(env,
+                     args.This(),
+                     path.ToString(),
+                     args[1].As<Int32>()->Value(),
+                     args[2].As<Int32>()->Value(),
+                     args[3].As<ArrayBufferView>());
+  }
+
+  // Returns undefined when the job was scheduled, or the ERR_ACCESS_DENIED
+  // error the asynchronous open() would have delivered (nothing is scheduled).
+  static void Run(const FunctionCallbackInfo<Value>& args) {
+    WriteFileJob* job;
+    ASSIGN_OR_RETURN_UNWRAP(&job, args.This());
+    Environment* env = job->AsyncWrap::env();
+    CHECK(!job->scheduled_);
+    BufferValue path(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*path);
+    ToNamespacedPath(env, &path);
+    Local<Value> access_error;
+    if (ReadFileJob::OpenPermissionError(env, path, job->flags_)
+            .ToLocal(&access_error)) {
+      args.GetReturnValue().Set(access_error);
+      return;
+    }
+    job->scheduled_ = true;
+    job->ClearWeak();
+    FS_ASYNC_TRACE_BEGIN0(UV_FS_WRITE, job)
+    job->ScheduleWork();
+  }
+
+  void DoThreadPoolWork() override {
+    uv_fs_t req;
+    int fd = uv_fs_open(nullptr, &req, path_.c_str(), flags_, mode_, nullptr);
+    uv_fs_req_cleanup(&req);
+    if (fd < 0) return Fail("open", fd);
+
+    size_t written = 0;
+    while (written < length_) {
+      uv_buf_t buf = uv_buf_init(data_ + written,
+                                 static_cast<unsigned int>(std::min<size_t>(
+                                     length_ - written, kMaxWriteChunk)));
+      int r = uv_fs_write(nullptr, &req, fd, &buf, 1, -1, nullptr);
+      uv_fs_req_cleanup(&req);
+      if (r < 0) {
+        Fail("write", r);
+        break;
+      }
+      written += static_cast<size_t>(r);
+    }
+
+    int rc = uv_fs_close(nullptr, &req, fd, nullptr);
+    uv_fs_req_cleanup(&req);
+    if (rc < 0 && error_ == 0) Fail("close", rc);
+  }
+
+  void AfterThreadPoolWork(int status) override {
+    Environment* env = AsyncWrap::env();
+    std::unique_ptr<WriteFileJob> self(this);
+    CHECK(status == 0 || status == UV_ECANCELED);
+    FS_ASYNC_TRACE_END0(UV_FS_WRITE, this)
+    if (status == UV_ECANCELED || !env->can_call_into_js()) return;
+    HandleScope handle_scope(env->isolate());
+    Context::Scope context_scope(env->context());
+    Isolate* isolate = env->isolate();
+    Local<Value> argv[1] = {Null(isolate)};
+    if (error_ != 0) {
+      argv[0] = UVException(isolate,
+                            error_,
+                            syscall_,
+                            nullptr,
+                            syscall_ == kOpen ? path_.c_str() : nullptr);
+    }
+    MakeCallback(env->ondone_string(), arraysize(argv), argv);
+  }
+
+  bool IsNotIndicativeOfMemoryLeakAtExit() const override { return true; }
+  void MemoryInfo(MemoryTracker* tracker) const override {
+    tracker->TrackField("buffer", buffer_);
+    if (copy_) tracker->TrackFieldWithSize("copy", length_);
+  }
+  SET_MEMORY_INFO_NAME(WriteFileJob)
+  SET_SELF_SIZE(WriteFileJob)
+
+ private:
+  static constexpr size_t kMaxWriteChunk = 256 * 1024 * 1024;
+  static constexpr const char* kOpen = "open";
+
+  WriteFileJob(Environment* env,
+               Local<Object> object,
+               std::string&& path,
+               int flags,
+               int mode,
+               Local<ArrayBufferView> view)
+      : AsyncWrap(env, object, AsyncWrap::PROVIDER_FSREQCALLBACK),
+        ThreadPoolWork(env, ThreadPoolWorkType::kFsWriteFile),
+        path_(std::move(path)),
+        flags_(flags),
+        mode_(mode) {
+    // Holding the backing store keeps the memory valid even if the buffer is
+    // detached or collected meanwhile; a resizable buffer can still have its
+    // pages decommitted by a shrink, so its contents are copied instead.
+    length_ = view->ByteLength();
+    backing_store_ = view->Buffer()->GetBackingStore();
+    if (backing_store_->IsResizableByUserJavaScript()) {
+      copy_.reset(new char[length_]);
+      memcpy(copy_.get(),
+             static_cast<char*>(backing_store_->Data()) + view->ByteOffset(),
+             length_);
+      data_ = copy_.get();
+      backing_store_.reset();
+    } else {
+      buffer_.Reset(env->isolate(), view);
+      data_ = static_cast<char*>(backing_store_->Data()) + view->ByteOffset();
+    }
+    MakeWeak();
+  }
+
+  void Fail(const char* syscall, int error) {
+    syscall_ = syscall;
+    error_ = error;
+  }
+
+  const std::string path_;
+  v8::Global<v8::ArrayBufferView> buffer_;
+  std::shared_ptr<v8::BackingStore> backing_store_;
+  std::unique_ptr<char[]> copy_;
+  char* data_ = nullptr;
+  size_t length_ = 0;
+  const int flags_;
+  const int mode_;
+  bool scheduled_ = false;
+  int error_ = 0;
+  const char* syscall_ = nullptr;
+};
 
 // Wrapper for readv(2).
 //
@@ -2985,9 +4026,8 @@ static void ReadBuffers(const FunctionCallbackInfo<Value>& args) {
     iovs[i] = uv_buf_init(Buffer::Data(buffer), Buffer::Length(buffer));
   }
 
-  if (argc > 3) {  // readBuffers(fd, buffers, pos, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // readBuffers(fd, buffers, pos, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_READ, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -3031,9 +4071,8 @@ static void Chmod(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[1]->IsInt32());
   int mode = args[1].As<Int32>()->Value();
 
-  if (argc > 2) {  // chmod(path, mode, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // chmod(path, mode, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_CHMOD, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -3070,9 +4109,8 @@ static void FChmod(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[1]->IsInt32());
   const int mode = args[1].As<Int32>()->Value();
 
-  if (argc > 2) {  // fchmod(fd, mode, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // fchmod(fd, mode, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FCHMOD, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -3110,14 +4148,13 @@ static void Chown(const FunctionCallbackInfo<Value>& args) {
   CHECK(IsSafeJsInt(args[2]));
   const auto gid = FromV8Value<uv_gid_t, true>(args[2]);
 
-  if (argc > 3) {  // chown(path, uid, gid, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // chown(path, uid, gid, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_CHOWN, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -3131,10 +4168,6 @@ static void Chown(const FunctionCallbackInfo<Value>& args) {
               uid,
               gid);
   } else {  // chown(path, uid, gid)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
     FSReqWrapSync req_wrap_sync("chown", *path);
     FS_SYNC_TRACE_BEGIN(chown);
     SyncCallAndThrowOnError(env, &req_wrap_sync, uv_fs_chown, *path, uid, gid);
@@ -3162,9 +4195,8 @@ static void FChown(const FunctionCallbackInfo<Value>& args) {
   CHECK(IsSafeJsInt(args[2]));
   const auto gid = FromV8Value<uv_gid_t, true>(args[2]);
 
-  if (argc > 3) {  // fchown(fd, uid, gid, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // fchown(fd, uid, gid, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FCHOWN, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -3200,14 +4232,13 @@ static void LChown(const FunctionCallbackInfo<Value>& args) {
   CHECK(IsSafeJsInt(args[2]));
   const auto gid = FromV8Value<uv_gid_t, true>(args[2]);
 
-  if (argc > 3) {  // lchown(path, uid, gid, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      path.ToStringView());
+  if (req_wrap_async != nullptr) {  // lchown(path, uid, gid, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_LCHOWN, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -3221,10 +4252,6 @@ static void LChown(const FunctionCallbackInfo<Value>& args) {
               uid,
               gid);
   } else {  // lchown(path, uid, gid)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        path.ToStringView());
     FSReqWrapSync req_wrap_sync("lchown", *path);
     FS_SYNC_TRACE_BEGIN(lchown);
     SyncCallAndThrowOnError(env, &req_wrap_sync, uv_fs_lchown, *path, uid, gid);
@@ -3250,9 +4277,8 @@ static void UTimes(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsNumber());
   const double mtime = args[2].As<Number>()->Value();
 
-  if (argc > 3) {  // utimes(path, atime, mtime, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // utimes(path, atime, mtime, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_UTIME, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -3291,9 +4317,8 @@ static void FUTimes(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsNumber());
   const double mtime = args[2].As<Number>()->Value();
 
-  if (argc > 3) {  // futimes(fd, atime, mtime, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // futimes(fd, atime, mtime, req)
     FS_ASYNC_TRACE_BEGIN0(UV_FS_FUTIME, req_wrap_async)
     AsyncCall(env,
               req_wrap_async,
@@ -3332,9 +4357,8 @@ static void LUTimes(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsNumber());
   const double mtime = args[2].As<Number>()->Value();
 
-  if (argc > 3) {  // lutimes(path, atime, mtime, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 3);
-    CHECK_NOT_NULL(req_wrap_async);
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 3);
+  if (req_wrap_async != nullptr) {  // lutimes(path, atime, mtime, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_LUTIME, req_wrap_async, "path", TRACE_STR_COPY(*path))
     AsyncCall(env,
@@ -3356,6 +4380,15 @@ static void LUTimes(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
+// Appends the placeholder that mkdtemp() and mkstemp() replace.
+static void AppendTemplateSuffix(BufferValue* tmpl) {
+  static constexpr std::string_view suffix = "XXXXXX";
+  const auto prefix_length = tmpl->length();
+  tmpl->AllocateSufficientStorage(prefix_length + suffix.size() + 1);
+  memcpy(tmpl->out() + prefix_length, suffix.data(), suffix.size());
+  tmpl->SetLengthAndZeroTerminate(prefix_length + suffix.size());
+}
+
 static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = env->isolate();
@@ -3364,23 +4397,19 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
   CHECK_GE(argc, 2);
 
   BufferValue tmpl(isolate, args[0]);
-  static constexpr const char* const suffix = "XXXXXX";
-  const auto length = tmpl.length();
-  tmpl.AllocateSufficientStorage(length + strlen(suffix));
-  snprintf(tmpl.out() + length, tmpl.length(), "%s", suffix);
+  AppendTemplateSuffix(&tmpl);
 
   CHECK_NOT_NULL(*tmpl);
 
   const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
 
-  if (argc > 2) {  // mkdtemp(tmpl, encoding, req)
-    FSReqBase* req_wrap_async = GetReqWrap(args, 2);
-    CHECK_NOT_NULL(req_wrap_async);
-    ASYNC_THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        req_wrap_async,
-        permission::PermissionScope::kFileSystemWrite,
-        tmpl.ToStringView());
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  FS_THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      req_wrap_async,
+      permission::PermissionScope::kFileSystemWrite,
+      tmpl.ToStringView());
+  if (req_wrap_async != nullptr) {  // mkdtemp(tmpl, encoding, req)
     FS_ASYNC_TRACE_BEGIN1(
         UV_FS_MKDTEMP, req_wrap_async, "path", TRACE_STR_COPY(*tmpl))
     AsyncCall(env,
@@ -3392,10 +4421,6 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
               uv_fs_mkdtemp,
               *tmpl);
   } else {  // mkdtemp(tmpl, encoding)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env,
-        permission::PermissionScope::kFileSystemWrite,
-        tmpl.ToStringView());
     FSReqWrapSync req_wrap_sync("mkdtemp", *tmpl);
     FS_SYNC_TRACE_BEGIN(mkdtemp);
     int result =
@@ -3409,6 +4434,66 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
             .ToLocal(&ret)) {
       args.GetReturnValue().Set(ret);
     }
+  }
+}
+
+// mkstemp() creates the file and opens it for reading and writing, so it
+// needs the same permissions as the equivalent open().
+static constexpr int kMkstempFlags =
+    UV_FS_O_RDWR | UV_FS_O_CREAT | UV_FS_O_EXCL;
+
+static void Mkstemp(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  Isolate* isolate = env->isolate();
+
+  const int argc = args.Length();
+  CHECK_GE(argc, 2);
+
+  BufferValue tmpl(isolate, args[0]);
+  AppendTemplateSuffix(&tmpl);
+  CHECK_NOT_NULL(*tmpl);
+
+  const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
+
+  FSReqBase* req_wrap_async = GetAsyncReqWrap(args, 2);
+  if (req_wrap_async != nullptr) {  // mkstemp(tmpl, encoding, req)
+    if (AsyncCheckOpenPermissions(env, req_wrap_async, tmpl, kMkstempFlags)
+            .IsNothing()) {
+      return;
+    }
+    // The callback API gets a file descriptor, the promise API a FileHandle.
+    uv_fs_cb after =
+        args[2]->IsObject() ? AfterMkstemp : AfterMkstempFileHandle;
+    FS_ASYNC_TRACE_BEGIN1(
+        UV_FS_MKSTEMP, req_wrap_async, "path", TRACE_STR_COPY(*tmpl))
+    // The template is saved in the request to report it if mkstemp() fails.
+    AsyncDestCall(env,
+                  req_wrap_async,
+                  args,
+                  "mkstemp",
+                  *tmpl,
+                  tmpl.length(),
+                  encoding,
+                  after,
+                  uv_fs_mkstemp,
+                  *tmpl);
+  } else {  // mkstemp(tmpl, encoding)
+    if (CheckOpenPermissions(env, tmpl, kMkstempFlags).IsNothing()) return;
+    FSReqWrapSync req_wrap_sync("mkstemp", *tmpl);
+    FS_SYNC_TRACE_BEGIN(mkstemp);
+    int fd = SyncCallAndThrowOnError(env, &req_wrap_sync, uv_fs_mkstemp, *tmpl);
+    FS_SYNC_TRACE_END(mkstemp);
+    if (is_uv_error(fd)) {
+      return;
+    }
+    MaybeLocal<Value> result = MkstempResult(
+        isolate,
+        fd,
+        [&]() {
+          return StringBytes::Encode(isolate, req_wrap_sync.req.path, encoding);
+        },
+        [&]() { return MkstempFd(env, fd); });
+    args.GetReturnValue().Set(result.FromMaybe(Local<Value>()));
   }
 }
 
@@ -3510,8 +4595,10 @@ static void CpSyncCheckPaths(const FunctionCallbackInfo<Value>& args) {
   auto dest_path_str = ConvertPathToUTF8(dest_path);
 
   if (!error_code) {
-    // Check if src and dest are identical.
-    if (std::filesystem::equivalent(src_path, dest_path)) {
+    // Check if src and dest are identical. A dangling dest symlink makes
+    // equivalent() fail, which means they are not the same file.
+    std::error_code equivalent_error;
+    if (std::filesystem::equivalent(src_path, dest_path, equivalent_error)) {
       static constexpr const char* message =
           "src and dest cannot be the same %s";
       return THROW_ERR_FS_CP_EINVAL(env, message, dest_path_str);
@@ -3596,17 +4683,100 @@ static void CpSyncCheckPaths(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
-static bool CopyUtimes(const std::filesystem::path& src,
-                       const std::filesystem::path& dest,
-                       Environment* env) {
+std::vector<std::string> normalizePathToArray(
+    const std::filesystem::path& path) {
+  std::vector<std::string> parts;
+  std::error_code error;
+  std::filesystem::path absPath = std::filesystem::absolute(path, error);
+  if (error) absPath = path;
+#ifdef _WIN32
+  auto wstr = absPath.wstring();
+  if (wstr.starts_with(L"\\\\?\\")) {
+    absPath = std::filesystem::path(wstr.substr(4));
+  }
+#endif
+  for (const auto& part : absPath) {
+    if (!part.empty()) parts.push_back(part.string());
+  }
+  return parts;
+}
+
+bool isInsideDir(const std::filesystem::path& src,
+                 const std::filesystem::path& dest) {
+  auto srcArr = normalizePathToArray(src);
+  auto destArr = normalizePathToArray(dest);
+  if (srcArr.size() > destArr.size()) return false;
+  return std::equal(srcArr.begin(), srcArr.end(), destArr.begin());
+}
+
+namespace {
+
+// An fs.cp error recorded on whatever thread performed the copy; Throw() /
+// ToException() turn it into the error the JavaScript caller sees.
+struct CpError {
+  enum Kind {
+    kNone,
+    kErrno,
+    kUv,
+    kEinval,
+    kSymlinkToSubdirectory,
+    kEexist,
+    kSocket,
+    kFifo,
+    kUnknown
+  };
+  Kind kind = kNone;
+  int code = 0;
+  const char* syscall = "cp";
+  std::string message;
+  std::string path;
+
+  static CpError Std(const std::error_code& error, const std::string& path) {
+    return {kErrno, error.value(), "cp", error.message(), path};
+  }
+  static CpError Uv(int code, const char* syscall, const std::string& path) {
+    return {kUv, code, syscall, {}, path};
+  }
+
+  Local<Value> ToException(Environment* env) const {
+    Isolate* isolate = env->isolate();
+    switch (kind) {
+      case kErrno:
+        return ErrnoException(
+            isolate, code, syscall, message.c_str(), path.c_str());
+      case kUv:
+        return UVException(isolate, code, syscall, nullptr, path.c_str());
+      case kEinval:
+        return ERR_FS_CP_EINVAL(isolate, "%s", message);
+      case kSymlinkToSubdirectory:
+        return ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY(isolate, "%s", message);
+      case kEexist:
+        return ERR_FS_CP_EEXIST(isolate, "%s", message);
+      // Sockets, FIFOs and unknown entries are reported to JS by kind and
+      // path (see CpDirJob), cpSync skips them; neither builds an error here.
+      case kSocket:
+      case kFifo:
+      case kUnknown:
+      case kNone:
+        break;
+    }
+    UNREACHABLE();
+  }
+
+  void Throw(Environment* env) const {
+    env->isolate()->ThrowException(ToException(env));
+  }
+};
+
+CpError CopyUtimes(const std::filesystem::path& src,
+                   const std::filesystem::path& dest) {
   uv_fs_t req;
   auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
 
   auto src_path_str = ConvertPathToUTF8(src);
   int result = uv_fs_stat(nullptr, &req, src_path_str.c_str(), nullptr);
   if (is_uv_error(result)) {
-    env->ThrowUVException(result, "stat", nullptr, src_path_str.c_str());
-    return false;
+    return CpError::Uv(result, "stat", src_path_str);
   }
 
   const uv_stat_t* const s = static_cast<const uv_stat_t*>(req.ptr);
@@ -3621,12 +4791,367 @@ static bool CopyUtimes(const std::filesystem::path& src,
                                  source_mtime,
                                  nullptr);
   if (is_uv_error(utime_result)) {
-    env->ThrowUVException(
-        utime_result, "utime", nullptr, dest_file_path_str.c_str());
-    return false;
+    return CpError::Uv(utime_result, "utime", dest_file_path_str);
   }
-  return true;
+  return {};
 }
+
+struct CpDirOptions {
+  bool force;
+  bool dereference;
+  bool error_on_exist;
+  bool verbatim_symlinks;
+  bool preserve_timestamps;
+  // Set for fs.cp(), which only takes this path for a destination that did
+  // not exist: nothing already present is ever opened for writing or
+  // followed. Directories are created with mkdir() and files with an
+  // exclusive uv_fs_copyfile(), so anything that appears in their place
+  // (a symbolic link included) is EEXIST; sockets, FIFOs and unknown
+  // entries are rejected as the JavaScript walk does; relative link targets
+  // are resolved lexically, as path.resolve() would. fs.cpSync() merges
+  // into existing directories, skips those entries and canonicalizes link
+  // targets.
+  bool fresh_destination;
+  // fs.copyFile() mode flags (COPYFILE_FICLONE etc.) for fresh_destination.
+  int copyfile_flags;
+};
+
+CpError CopyFileFresh(const std::filesystem::path& src,
+                      const std::filesystem::path& dest,
+                      int flags) {
+  uv_fs_t req;
+  auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+  auto src_str = ConvertPathToUTF8(src);
+  auto dest_str = ConvertPathToUTF8(dest);
+  int rc = uv_fs_copyfile(nullptr,
+                          &req,
+                          src_str.c_str(),
+                          dest_str.c_str(),
+                          flags | UV_FS_COPYFILE_EXCL,
+                          nullptr);
+  if (rc < 0) {
+    return CpError::Uv(rc, "copyfile", dest_str);
+  }
+  return {};
+}
+
+// mkdir() that does not follow or accept anything already at `path`.
+CpError MakeFreshDirectory(const std::filesystem::path& path) {
+  uv_fs_t req;
+  auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+  auto path_str = ConvertPathToUTF8(path);
+  int rc = uv_fs_mkdir(nullptr, &req, path_str.c_str(), 0777, nullptr);
+  if (rc < 0) {
+    return CpError::Uv(rc, "mkdir", path_str);
+  }
+  return {};
+}
+
+// The recursive directory copy behind fs.cpSync() and, on the thread pool,
+// fs.cp()/fsPromises.cp() when no filter function is involved. Runs on any
+// thread; touches no JS.
+CpError CopyDirRecursive(const std::filesystem::path& src_path,
+                         const std::filesystem::path& dest_path,
+                         const std::string& dest_display,
+                         const CpDirOptions& options) {
+  std::error_code error;
+  bool dest_existed = false;
+  if (options.fresh_destination) {
+    CpError made = MakeFreshDirectory(dest_path);
+    if (made.kind != CpError::kNone) return made;
+  } else {
+    dest_existed = std::filesystem::exists(dest_path, error);
+    std::filesystem::create_directories(dest_path, error);
+    if (error) {
+      return CpError::Std(error, dest_display);
+    }
+  }
+
+  auto file_copy_opts = std::filesystem::copy_options::recursive;
+  if (options.force) {
+    file_copy_opts |= std::filesystem::copy_options::overwrite_existing;
+  } else if (options.error_on_exist) {
+    file_copy_opts |= std::filesystem::copy_options::none;
+  } else {
+    file_copy_opts |= std::filesystem::copy_options::skip_existing;
+  }
+
+  std::function<CpError(std::filesystem::path, std::filesystem::path)>
+      copy_dir_contents;
+  copy_dir_contents = [&options, &copy_dir_contents, file_copy_opts](
+                          std::filesystem::path src,
+                          std::filesystem::path dest) -> CpError {
+    std::error_code error;
+    // Only the error_code overloads are used from here on: this runs on a
+    // thread pool thread and exceptions are disabled.
+    auto it = std::filesystem::directory_iterator(src, error);
+    if (error) {
+      return CpError::Std(error, ConvertPathToUTF8(src));
+    }
+    for (const auto end = std::filesystem::directory_iterator(); it != end;
+         it.increment(error)) {
+      if (error) {
+        return CpError::Std(error, ConvertPathToUTF8(src));
+      }
+      const auto& dir_entry = *it;
+      auto dest_file_path = dest / dir_entry.path().filename();
+      auto dest_str = ConvertPathToUTF8(dest);
+
+      // With dereference, links that resolve to a directory or a regular file
+      // fall through to the branches below, which follow symlinks. A link
+      // whose target cannot be reached has nothing to copy, and stat() reports
+      // why. std::filesystem::status() does not: it folds ENOTDIR into
+      // not_found, and on Windows its error_code carries a Win32 value where
+      // an errno is expected.
+      const bool is_symlink = dir_entry.is_symlink(error);
+      if (is_symlink && options.dereference) {
+        uv_fs_t req;
+        auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+        auto entry_str = ConvertPathToUTF8(dir_entry.path());
+        int rc = uv_fs_stat(nullptr, &req, entry_str.c_str(), nullptr);
+        if (rc < 0) {
+          return CpError::Uv(rc, "stat", entry_str);
+        }
+      }
+
+      if (is_symlink && !options.dereference) {
+        if (options.verbatim_symlinks) {
+          std::filesystem::copy_symlink(
+              dir_entry.path(), dest_file_path, error);
+          if (error) {
+            return CpError::Std(error, dest_str);
+          }
+        } else {
+          auto symlink_target =
+              std::filesystem::read_symlink(dir_entry.path().c_str(), error);
+          if (error) {
+            return CpError::Std(error, dest_str);
+          }
+
+          if (std::filesystem::exists(dest_file_path, error)) {
+            if (std::filesystem::is_symlink(dest_file_path, error)) {
+              auto current_dest_symlink_target =
+                  std::filesystem::read_symlink(dest_file_path.c_str(), error);
+              if (error) {
+                return CpError::Std(error, dest_str);
+              }
+
+              if (!options.dereference &&
+                  std::filesystem::is_directory(symlink_target, error) &&
+                  isInsideDir(symlink_target, current_dest_symlink_target)) {
+                return {CpError::kEinval,
+                        0,
+                        "cp",
+                        SPrintF("Cannot copy %s to a subdirectory of self %s",
+                                symlink_target,
+                                current_dest_symlink_target),
+                        {}};
+              }
+
+              // Prevent copy if src is a subdir of dest since unlinking
+              // dest in this case would result in removing src contents
+              // and therefore a broken symlink would be created.
+              if (std::filesystem::is_directory(dest_file_path, error) &&
+                  isInsideDir(current_dest_symlink_target, symlink_target)) {
+                return {CpError::kSymlinkToSubdirectory,
+                        0,
+                        "cp",
+                        SPrintF("cannot overwrite %s with %s",
+                                current_dest_symlink_target,
+                                symlink_target),
+                        {}};
+              }
+
+              // symlinks get overridden by cp even if force: false, this is
+              // being applied here for backward compatibility, but is it
+              // correct? or is it a bug?
+              std::filesystem::remove(dest_file_path, error);
+              if (error) {
+                return CpError::Std(error, dest_str);
+              }
+            } else if (std::filesystem::is_regular_file(dest_file_path,
+                                                        error)) {
+              if (!options.dereference ||
+                  (!options.force && options.error_on_exist)) {
+                return CpError::Std(
+                    std::make_error_code(std::errc::file_exists),
+                    ConvertPathToUTF8(dest_file_path));
+              }
+            }
+          }
+          std::filesystem::path symlink_target_absolute;
+          if (options.fresh_destination) {
+            // As path.resolve() does: lexical only, absolute targets verbatim.
+            symlink_target_absolute =
+                symlink_target.is_absolute()
+                    ? symlink_target
+                    : std::filesystem::absolute(src / symlink_target, error)
+                          .lexically_normal();
+          } else {
+            symlink_target_absolute = std::filesystem::weakly_canonical(
+                std::filesystem::absolute(src / symlink_target, error), error);
+          }
+          if (error) {
+            return CpError::Std(error, dest_str);
+          }
+#ifdef _WIN32
+          auto wstr = symlink_target_absolute.wstring();
+          if (wstr.starts_with(L"\\\\?\\")) {
+            symlink_target_absolute = std::filesystem::path(wstr.substr(4));
+          }
+#endif
+          if (dir_entry.is_directory(error)) {
+            std::filesystem::create_directory_symlink(
+                symlink_target_absolute, dest_file_path, error);
+          } else {
+            std::filesystem::create_symlink(
+                symlink_target_absolute, dest_file_path, error);
+          }
+          if (error) {
+            return CpError::Std(error, dest_str);
+          }
+        }
+      } else if (dir_entry.is_directory(error)) {
+        auto entry_dir_path = src / dir_entry.path().filename();
+        bool created = true;
+        if (options.fresh_destination) {
+          CpError made = MakeFreshDirectory(dest_file_path);
+          if (made.kind != CpError::kNone) return made;
+        } else if (is_symlink) {
+          // Mirror the JavaScript walk: create the destination only when it
+          // does not exist, otherwise recurse into the existing path.
+          created = !std::filesystem::exists(dest_file_path, error);
+          if (error) {
+            return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
+          }
+          if (created) {
+            std::filesystem::create_directory(dest_file_path, error);
+            if (error) {
+              return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
+            }
+          }
+        } else {
+          created = std::filesystem::create_directory(dest_file_path, error);
+          if (error) {
+            return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
+          }
+        }
+        CpError inner = copy_dir_contents(entry_dir_path, dest_file_path);
+        if (inner.kind != CpError::kNone) {
+          return inner;
+        }
+        // A directory created by the copy gets the mode of its source once
+        // its contents are in (the source may be read-only).
+        if (created) {
+          std::filesystem::permissions(
+              dest_file_path, dir_entry.status(error).permissions(), error);
+          if (error) {
+            return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
+          }
+        }
+        if (options.preserve_timestamps) {
+          CpError stamped = CopyUtimes(entry_dir_path, dest_file_path);
+          if (stamped.kind != CpError::kNone) return stamped;
+        }
+      } else if (dir_entry.is_regular_file(error)) {
+        if (is_symlink && !options.fresh_destination) {
+          // Only a dereferenced link reaches this branch as a link, so what an
+          // occupied destination means here is settled the way the JavaScript
+          // walk settles it: replaced under force, left untouched otherwise.
+          // Replacing an existing destination unlinks the entry first, which is
+          // what keeps an existing link there from being written through.
+          std::error_code dest_error;
+          const bool dest_exists =
+              std::filesystem::exists(dest_file_path, dest_error);
+          if (dest_error) {
+            return CpError::Std(dest_error, ConvertPathToUTF8(dest_file_path));
+          }
+
+          if (dest_exists) {
+            if (!options.force) {
+              if (options.error_on_exist) {
+                return {CpError::kEexist,
+                        0,
+                        "cp",
+                        SPrintF("[ERR_FS_CP_EEXIST]: Target already exists: "
+                                "cp returned EEXIST (%s already exists)",
+                                dest_file_path),
+                        {}};
+              }
+              continue;
+            }
+
+            std::filesystem::remove(dest_file_path, dest_error);
+            if (dest_error) {
+              return CpError::Std(dest_error,
+                                  ConvertPathToUTF8(dest_file_path));
+            }
+          }
+        }
+
+        bool copied = true;
+        if (options.fresh_destination) {
+          CpError fresh = CopyFileFresh(
+              dir_entry.path(), dest_file_path, options.copyfile_flags);
+          if (fresh.kind != CpError::kNone) return fresh;
+        } else {
+          copied = std::filesystem::copy_file(
+              dir_entry.path(), dest_file_path, file_copy_opts, error);
+        }
+        if (error) {
+          if (error == std::errc::file_exists) {
+            return {CpError::kEexist,
+                    0,
+                    "cp",
+                    SPrintF("[ERR_FS_CP_EEXIST]: Target already exists: "
+                            "cp returned EEXIST (%s already exists)",
+                            dest_file_path),
+                    {}};
+          }
+          return CpError::Std(error, dest_str);
+        }
+
+        if (copied && options.preserve_timestamps) {
+          CpError utimes = CopyUtimes(dir_entry.path(), dest_file_path);
+          if (utimes.kind != CpError::kNone) {
+            return utimes;
+          }
+        }
+        // Both copies set the mode before writing the data, which clears
+        // setuid/setgid; put the source mode back once the data is in.
+        if (copied) {
+          std::filesystem::permissions(
+              dest_file_path, dir_entry.status(error).permissions(), error);
+          if (error) {
+            return CpError::Std(error, ConvertPathToUTF8(dest_file_path));
+          }
+        }
+      } else if (options.fresh_destination) {
+        CpError::Kind kind = dir_entry.is_socket(error) ? CpError::kSocket
+                             : dir_entry.is_fifo(error) ? CpError::kFifo
+                                                        : CpError::kUnknown;
+        return {kind, UV_EINVAL, "cp", {}, ConvertPathToUTF8(dest_file_path)};
+      }
+    }
+    return {};
+  };
+
+  CpError result = copy_dir_contents(src_path, dest_path);
+  if (result.kind != CpError::kNone) return result;
+  if (!dest_existed) {
+    std::filesystem::permissions(
+        dest_path,
+        std::filesystem::status(src_path, error).permissions(),
+        error);
+    if (error) {
+      return CpError::Std(error, dest_display);
+    }
+  }
+  if (options.preserve_timestamps) return CopyUtimes(src_path, dest_path);
+  return {};
+}
+
+}  // namespace
 
 static void CpSyncOverrideFile(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -3678,32 +5203,11 @@ static void CpSyncOverrideFile(const FunctionCallbackInfo<Value>& args) {
   }
 
   if (preserve_timestamps) {
-    CopyUtimes(src_path, dest_path, env);
+    CpError error = CopyUtimes(src_path, dest_path);
+    if (error.kind != CpError::kNone) {
+      error.Throw(env);
+    }
   }
-}
-
-std::vector<std::string> normalizePathToArray(
-    const std::filesystem::path& path) {
-  std::vector<std::string> parts;
-  std::filesystem::path absPath = std::filesystem::absolute(path);
-#ifdef _WIN32
-  auto wstr = absPath.wstring();
-  if (wstr.starts_with(L"\\\\?\\")) {
-    absPath = std::filesystem::path(wstr.substr(4));
-  }
-#endif
-  for (const auto& part : absPath) {
-    if (!part.empty()) parts.push_back(part.string());
-  }
-  return parts;
-}
-
-bool isInsideDir(const std::filesystem::path& src,
-                 const std::filesystem::path& dest) {
-  auto srcArr = normalizePathToArray(src);
-  auto destArr = normalizePathToArray(dest);
-  if (srcArr.size() > destArr.size()) return false;
-  return std::equal(srcArr.begin(), srcArr.end(), destArr.begin());
 }
 
 static void CpSyncCopyDir(const FunctionCallbackInfo<Value>& args) {
@@ -3730,157 +5234,118 @@ static void CpSyncCopyDir(const FunctionCallbackInfo<Value>& args) {
   auto src_path = src.ToPath();
   auto dest_path = dest.ToPath();
 
-  std::error_code error;
-  std::filesystem::create_directories(dest_path, error);
-  if (error) {
-    return env->ThrowStdErrException(error, "cp", *dest);
+  CpError error = CopyDirRecursive(src_path,
+                                   dest_path,
+                                   dest.ToString(),
+                                   {force,
+                                    dereference,
+                                    error_on_exist,
+                                    verbatim_symlinks,
+                                    preserve_timestamps,
+                                    false,
+                                    0});
+  if (error.kind != CpError::kNone) {
+    error.Throw(env);
   }
-
-  auto file_copy_opts = std::filesystem::copy_options::recursive;
-  if (force) {
-    file_copy_opts |= std::filesystem::copy_options::overwrite_existing;
-  } else if (error_on_exist) {
-    file_copy_opts |= std::filesystem::copy_options::none;
-  } else {
-    file_copy_opts |= std::filesystem::copy_options::skip_existing;
-  }
-
-  std::function<bool(std::filesystem::path, std::filesystem::path)>
-      copy_dir_contents;
-  copy_dir_contents = [verbatim_symlinks,
-                       &copy_dir_contents,
-                       &env,
-                       file_copy_opts,
-                       preserve_timestamps,
-                       force,
-                       error_on_exist,
-                       dereference,
-                       &isolate](std::filesystem::path src,
-                                 std::filesystem::path dest) {
-    std::error_code error;
-    for (auto dir_entry : std::filesystem::directory_iterator(src)) {
-      auto dest_file_path = dest / dir_entry.path().filename();
-      auto dest_str = ConvertPathToUTF8(dest);
-
-      if (dir_entry.is_symlink()) {
-        if (verbatim_symlinks) {
-          std::filesystem::copy_symlink(
-              dir_entry.path(), dest_file_path, error);
-          if (error) {
-            env->ThrowStdErrException(error, "cp", dest_str.c_str());
-            return false;
-          }
-        } else {
-          auto symlink_target =
-              std::filesystem::read_symlink(dir_entry.path().c_str(), error);
-          if (error) {
-            env->ThrowStdErrException(error, "cp", dest_str.c_str());
-            return false;
-          }
-
-          if (std::filesystem::exists(dest_file_path)) {
-            if (std::filesystem::is_symlink((dest_file_path.c_str()))) {
-              auto current_dest_symlink_target =
-                  std::filesystem::read_symlink(dest_file_path.c_str(), error);
-              if (error) {
-                env->ThrowStdErrException(error, "cp", dest_str.c_str());
-                return false;
-              }
-
-              if (!dereference &&
-                  std::filesystem::is_directory(symlink_target) &&
-                  isInsideDir(symlink_target, current_dest_symlink_target)) {
-                static constexpr const char* message =
-                    "Cannot copy %s to a subdirectory of self %s";
-                THROW_ERR_FS_CP_EINVAL(
-                    env, message, symlink_target, current_dest_symlink_target);
-                return false;
-              }
-
-              // Prevent copy if src is a subdir of dest since unlinking
-              // dest in this case would result in removing src contents
-              // and therefore a broken symlink would be created.
-              if (std::filesystem::is_directory(dest_file_path) &&
-                  isInsideDir(current_dest_symlink_target, symlink_target)) {
-                static constexpr const char* message =
-                    "cannot overwrite %s with %s";
-                THROW_ERR_FS_CP_SYMLINK_TO_SUBDIRECTORY(
-                    env, message, current_dest_symlink_target, symlink_target);
-                return false;
-              }
-
-              // symlinks get overridden by cp even if force: false, this is
-              // being applied here for backward compatibility, but is it
-              // correct? or is it a bug?
-              std::filesystem::remove(dest_file_path, error);
-              if (error) {
-                env->ThrowStdErrException(error, "cp", dest_str.c_str());
-                return false;
-              }
-            } else if (std::filesystem::is_regular_file(dest_file_path)) {
-              if (!dereference || (!force && error_on_exist)) {
-                auto dest_file_path_str = ConvertPathToUTF8(dest_file_path);
-                env->ThrowStdErrException(
-                    std::make_error_code(std::errc::file_exists),
-                    "cp",
-                    dest_file_path_str.c_str());
-                return false;
-              }
-            }
-          }
-          auto symlink_target_absolute = std::filesystem::weakly_canonical(
-              std::filesystem::absolute(src / symlink_target));
-#ifdef _WIN32
-          auto wstr = symlink_target_absolute.wstring();
-          if (wstr.starts_with(L"\\\\?\\")) {
-            symlink_target_absolute = std::filesystem::path(wstr.substr(4));
-          }
-#endif
-          if (dir_entry.is_directory()) {
-            std::filesystem::create_directory_symlink(
-                symlink_target_absolute, dest_file_path, error);
-          } else {
-            std::filesystem::create_symlink(
-                symlink_target_absolute, dest_file_path, error);
-          }
-          if (error) {
-            env->ThrowStdErrException(error, "cp", dest_str.c_str());
-            return false;
-          }
-        }
-      } else if (dir_entry.is_directory()) {
-        auto entry_dir_path = src / dir_entry.path().filename();
-        std::filesystem::create_directory(dest_file_path);
-        auto success = copy_dir_contents(entry_dir_path, dest_file_path);
-        if (!success) {
-          return false;
-        }
-      } else if (dir_entry.is_regular_file()) {
-        std::filesystem::copy_file(
-            dir_entry.path(), dest_file_path, file_copy_opts, error);
-        if (error) {
-          if (error == std::errc::file_exists) {
-            THROW_ERR_FS_CP_EEXIST(isolate,
-                                   "[ERR_FS_CP_EEXIST]: Target already exists: "
-                                   "cp returned EEXIST (%s already exists)",
-                                   dest_file_path);
-            return false;
-          }
-          env->ThrowStdErrException(error, "cp", dest_str.c_str());
-          return false;
-        }
-
-        if (preserve_timestamps &&
-            !CopyUtimes(dir_entry.path(), dest_file_path, env)) {
-          return false;
-        }
-      }
-    }
-    return true;
-  };
-
-  copy_dir_contents(src_path, dest_path);
 }
+
+// JS: const job = new CpDirJob(src, dest, force, dereference, errorOnExist,
+//                              verbatimSymlinks, preserveTimestamps);
+//     job.ondone = (err) => {...}; job.run();
+// Runs CopyDirRecursive() on the thread pool for fs.cp()/fsPromises.cp().
+class CpDirJob final : public AsyncWrap, public ThreadPoolWork {
+ public:
+  static void New(const FunctionCallbackInfo<Value>& args) {
+    CHECK(args.IsConstructCall());
+    Environment* env = Environment::GetCurrent(args);
+    CHECK_EQ(args.Length(), 8);
+    CHECK(args[7]->IsInt32());
+    BufferValue src(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*src);
+    ToNamespacedPath(env, &src);
+    BufferValue dest(env->isolate(), args[1]);
+    CHECK_NOT_NULL(*dest);
+    ToNamespacedPath(env, &dest);
+    new CpDirJob(env,
+                 args.This(),
+                 src.ToPath(),
+                 dest.ToPath(),
+                 dest.ToString(),
+                 {args[2]->IsTrue(),
+                  args[3]->IsTrue(),
+                  args[4]->IsTrue(),
+                  args[5]->IsTrue(),
+                  args[6]->IsTrue(),
+                  true,
+                  args[7].As<Int32>()->Value()});
+  }
+
+  static void Run(const FunctionCallbackInfo<Value>& args) {
+    CpDirJob* job;
+    ASSIGN_OR_RETURN_UNWRAP(&job, args.This());
+    CHECK(!job->scheduled_);
+    job->scheduled_ = true;
+    job->ClearWeak();
+    job->ScheduleWork();
+  }
+
+  void DoThreadPoolWork() override {
+    error_ = CopyDirRecursive(src_, dest_, dest_display_, options_);
+  }
+
+  void AfterThreadPoolWork(int status) override {
+    Environment* env = AsyncWrap::env();
+    std::unique_ptr<CpDirJob> self(this);
+    CHECK(status == 0 || status == UV_ECANCELED);
+    if (status == UV_ECANCELED || !env->can_call_into_js()) return;
+    Isolate* isolate = env->isolate();
+    HandleScope handle_scope(isolate);
+    Context::Scope context_scope(env->context());
+    Local<Value> argv[] = {
+        Null(isolate), Undefined(isolate), Undefined(isolate)};
+    const char* special = error_.kind == CpError::kSocket    ? "socket"
+                          : error_.kind == CpError::kFifo    ? "fifo"
+                          : error_.kind == CpError::kUnknown ? "unknown"
+                                                             : nullptr;
+    if (special != nullptr) {
+      Local<Value> path;
+      if (!ToV8Value(env->context(), error_.path).ToLocal(&path)) return;
+      argv[1] = OneByteString(isolate, special);
+      argv[2] = path;
+    } else if (error_.kind != CpError::kNone) {
+      argv[0] = error_.ToException(env);
+    }
+    MakeCallback(env->ondone_string(), arraysize(argv), argv);
+  }
+
+  bool IsNotIndicativeOfMemoryLeakAtExit() const override { return true; }
+  SET_NO_MEMORY_INFO()
+  SET_MEMORY_INFO_NAME(CpDirJob)
+  SET_SELF_SIZE(CpDirJob)
+
+ private:
+  CpDirJob(Environment* env,
+           Local<Object> object,
+           std::filesystem::path&& src,
+           std::filesystem::path&& dest,
+           std::string&& dest_display,
+           CpDirOptions options)
+      : AsyncWrap(env, object, AsyncWrap::PROVIDER_FSREQCALLBACK),
+        ThreadPoolWork(env, ThreadPoolWorkType::kFsCp),
+        src_(std::move(src)),
+        dest_(std::move(dest)),
+        dest_display_(std::move(dest_display)),
+        options_(options) {
+    MakeWeak();
+  }
+
+  const std::filesystem::path src_;
+  const std::filesystem::path dest_;
+  const std::string dest_display_;
+  const CpDirOptions options_;
+  CpError error_;
+  bool scheduled_ = false;
+};
 
 BindingData::FilePathIsFileReturnType BindingData::FilePathIsFile(
     Environment* env, const std::string& file_path) {
@@ -4117,12 +5582,8 @@ void BindingData::Deserialize(Local<Context> context,
                               int index,
                               InternalFieldInfoBase* info) {
   DCHECK_IS_SNAPSHOT_SLOT(index);
-  HandleScope scope(Isolate::GetCurrent());
-  Realm* realm = Realm::GetCurrent(context);
-  InternalFieldInfo* casted_info = static_cast<InternalFieldInfo*>(info);
-  BindingData* binding =
-      realm->AddBindingData<BindingData>(holder, casted_info);
-  CHECK_NOT_NULL(binding);
+  Realm::DeserializeBindingData<BindingData>(
+      context, holder, static_cast<InternalFieldInfo*>(info));
 }
 
 bool BindingData::PrepareForSerialization(Local<Context> context,
@@ -4144,10 +5605,7 @@ bool BindingData::PrepareForSerialization(Local<Context> context,
 }
 
 InternalFieldInfoBase* BindingData::Serialize(int index) {
-  DCHECK_IS_SNAPSHOT_SLOT(index);
-  InternalFieldInfo* info = internal_field_info_;
-  internal_field_info_ = nullptr;
-  return info;
+  return TakeInternalFieldInfo(index, &internal_field_info_);
 }
 
 #ifdef _WIN32
@@ -4214,6 +5672,7 @@ static void CreatePerIsolateProperties(IsolateData* isolate_data,
   SetMethod(isolate, target, "rmSync", RmSync);
   SetMethod(isolate, target, "mkdir", MKDir);
   SetMethod(isolate, target, "readdir", ReadDir);
+  SetMethod(isolate, target, "readdirRecursive", ReadDirRecursive);
   SetMethod(isolate, target, "internalModuleStat", InternalModuleStat);
   SetMethod(isolate, target, "stat", Stat);
   SetMethod(isolate, target, "lstat", LStat);
@@ -4242,6 +5701,7 @@ static void CreatePerIsolateProperties(IsolateData* isolate_data,
   SetMethod(isolate, target, "lutimes", LUTimes);
 
   SetMethod(isolate, target, "mkdtemp", Mkdtemp);
+  SetMethod(isolate, target, "mkstemp", Mkstemp);
 
 #ifdef _WIN32
   SetMethod(isolate, target, "handleToFd", HandleToFd);
@@ -4251,6 +5711,12 @@ static void CreatePerIsolateProperties(IsolateData* isolate_data,
   SetMethod(isolate, target, "cpSyncOverrideFile", CpSyncOverrideFile);
   SetMethod(isolate, target, "cpSyncCopyDir", CpSyncCopyDir);
 
+  Local<FunctionTemplate> cpj = NewFunctionTemplate(isolate, CpDirJob::New);
+  cpj->InstanceTemplate()->SetInternalFieldCount(CpDirJob::kInternalFieldCount);
+  cpj->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
+  SetProtoMethod(isolate, cpj, "run", CpDirJob::Run);
+  SetConstructorFunction(isolate, target, "CpDirJob", cpj);
+
   StatWatcher::CreatePerIsolateProperties(isolate_data, target);
   BindingData::CreatePerIsolateProperties(isolate_data, target);
 
@@ -4259,11 +5725,27 @@ static void CreatePerIsolateProperties(IsolateData* isolate_data,
       Integer::New(isolate,
                    static_cast<int32_t>(FsStatsOffset::kFsStatsFieldsNumber)));
 
+  // Create FunctionTemplate for ReadFileJob
+  Local<FunctionTemplate> rfj = NewFunctionTemplate(isolate, ReadFileJob::New);
+  rfj->InstanceTemplate()->SetInternalFieldCount(
+      ReadFileJob::kInternalFieldCount);
+  rfj->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
+  SetProtoMethod(isolate, rfj, "run", ReadFileJob::Run);
+  SetConstructorFunction(isolate, target, "ReadFileJob", rfj);
+
+  Local<FunctionTemplate> wfj = NewFunctionTemplate(isolate, WriteFileJob::New);
+  wfj->InstanceTemplate()->SetInternalFieldCount(
+      WriteFileJob::kInternalFieldCount);
+  wfj->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
+  SetProtoMethod(isolate, wfj, "run", WriteFileJob::Run);
+  SetConstructorFunction(isolate, target, "WriteFileJob", wfj);
+
   // Create FunctionTemplate for FSReqCallback
   Local<FunctionTemplate> fst = NewFunctionTemplate(isolate, NewFSReqCallback);
   fst->InstanceTemplate()->SetInternalFieldCount(
       FSReqBase::kInternalFieldCount);
   fst->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
+  SetProtoMethod(isolate, fst, "cancel", CancelFSReq);
   SetConstructorFunction(isolate, target, "FSReqCallback", fst);
 
   // Create FunctionTemplate for FileHandleReadWrap. There’s no need
@@ -4330,6 +5812,10 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(Close);
   registry->Register(ExistsSync);
   registry->Register(Open);
+  registry->Register(ReadFileJob::New);
+  registry->Register(ReadFileJob::Run);
+  registry->Register(WriteFileJob::New);
+  registry->Register(WriteFileJob::Run);
   registry->Register(OpenFileHandle);
   registry->Register(Read);
   registry->Register(ReadFileUtf8);
@@ -4342,6 +5828,7 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(RmSync);
   registry->Register(MKDir);
   registry->Register(ReadDir);
+  registry->Register(ReadDirRecursive);
   registry->Register(InternalModuleStat);
   registry->Register(Stat);
   registry->Register(LStat);
@@ -4361,6 +5848,8 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(CpSyncCheckPaths);
   registry->Register(CpSyncOverrideFile);
   registry->Register(CpSyncCopyDir);
+  registry->Register(CpDirJob::New);
+  registry->Register(CpDirJob::Run);
 
   registry->Register(Chmod);
   registry->Register(FChmod);
@@ -4374,10 +5863,12 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(LUTimes);
 
   registry->Register(Mkdtemp);
+  registry->Register(Mkstemp);
 #ifdef _WIN32
   registry->Register(HandleToFd);
 #endif
   registry->Register(NewFSReqCallback);
+  registry->Register(CancelFSReq);
 
   registry->Register(FileHandle::New);
   registry->Register(FileHandle::Close);

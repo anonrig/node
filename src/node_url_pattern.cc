@@ -6,10 +6,7 @@
 #include "node_errors.h"
 #include "node_mem-inl.h"
 #include "path.h"
-#include "simdutf.h"
 #include "util-inl.h"
-
-#include <cstring>
 
 namespace node {
 using node::url_pattern::URLPatternRegexProvider;
@@ -67,6 +64,7 @@ using v8::Local;
 using v8::LocalVector;
 using v8::MaybeLocal;
 using v8::Name;
+using v8::NewStringType;
 using v8::Object;
 using v8::PropertyAttribute;
 using v8::ReadOnly;
@@ -75,117 +73,25 @@ using v8::Signature;
 using v8::String;
 using v8::Value;
 
-namespace {
-
-// String::ValueView holds DisallowGarbageCollection. Copy into a C++ buffer
-// and destroy the view before creating any V8 heap objects.
-void CopyV8StringToBuffer(Isolate* isolate,
-                          Local<String> str,
-                          MaybeStackBuffer<char>* buffer) {
-  if (str->Length() == 0) {
-    buffer->SetLength(0);
-    return;
-  }
-  {
-    String::ValueView view(isolate, str);
-    if (view.is_one_byte()) {
-      const auto* data = reinterpret_cast<const char*>(view.data8());
-      const size_t length = view.length();
-      if (simdutf::validate_ascii(data, length)) [[likely]] {
-        buffer->AllocateSufficientStorage(length);
-        memcpy(buffer->out(), data, length);
-        buffer->SetLength(length);
-        return;
-      }
-    }
-  }
-  Utf8Value utf8(isolate, str);
-  buffer->AllocateSufficientStorage(utf8.length());
-  if (utf8.length() != 0) {
-    memcpy(buffer->out(), *utf8, utf8.length());
-  }
-  buffer->SetLength(utf8.length());
-}
-
-std::string V8StringToStdString(Isolate* isolate, Local<String> str) {
-  if (str->Length() == 0) {
-    return std::string();
-  }
-  {
-    String::ValueView view(isolate, str);
-    if (view.is_one_byte()) {
-      const auto* data = reinterpret_cast<const char*>(view.data8());
-      const size_t length = view.length();
-      if (simdutf::validate_ascii(data, length)) [[likely]] {
-        return std::string(data, length);
-      }
-    }
-  }
-  Utf8Value utf8(isolate, str);
-  return utf8.ToString();
-}
-
-// ada::url_pattern_input holds a string_view, so input_buf/base_buf must
-// outlive the subsequent test/exec call.
-bool ExtractInputAndBaseURL(Environment* env,
-                            const FunctionCallbackInfo<Value>& args,
-                            ada::url_pattern_input* input,
-                            std::optional<std::string_view>* base_url,
-                            MaybeStackBuffer<char>* input_buf,
-                            MaybeStackBuffer<char>* base_buf) {
-  Isolate* isolate = env->isolate();
-  if (args.Length() == 0 || args[0]->IsNullOrUndefined()) {
-    *input = ada::url_pattern_init{};
-  } else if (args[0]->IsString()) {
-    CopyV8StringToBuffer(isolate, args[0].As<String>(), input_buf);
-    *input = input_buf->ToStringView();
-  } else if (args[0]->IsObject()) {
-    auto maybe_input =
-        URLPattern::URLPatternInit::FromJsObject(env, args[0].As<Object>());
-    if (!maybe_input.has_value()) {
-      return false;
-    }
-    *input = std::move(*maybe_input);
-  } else {
-    THROW_ERR_INVALID_ARG_TYPE(
-        env, "URLPattern input needs to be a string or an object");
-    return false;
-  }
-
-  if (args.Length() > 1 && !args[1]->IsUndefined()) {
-    if (args[1]->IsNull()) {
-      *base_url = std::string_view("null");
-    } else if (args[1]->IsString()) {
-      CopyV8StringToBuffer(isolate, args[1].As<String>(), base_buf);
-      *base_url = base_buf->ToStringView();
-    } else {
-      THROW_ERR_INVALID_ARG_TYPE(env, "baseURL must be a string");
-      return false;
-    }
-  }
-  return true;
-}
-
-}  // namespace
-
 std::optional<URLPatternRegexProvider::regex_type>
 URLPatternRegexProvider::create_instance(std::string_view pattern,
                                          bool ignore_case) {
   auto isolate = Isolate::GetCurrent();
+  auto env = Environment::GetCurrent(isolate);
   int flags = RegExp::Flags::kUnicodeSets | RegExp::Flags::kDotAll;
   if (ignore_case) {
     flags |= static_cast<int>(RegExp::Flags::kIgnoreCase);
   }
 
-  Local<Context> context = isolate->GetCurrentContext();
-  Local<Value> pattern_value;
-  if (!ToV8Value(context, pattern, isolate).ToLocal(&pattern_value)) {
+  Local<String> local_pattern;
+  if (!String::NewFromUtf8(
+           isolate, pattern.data(), NewStringType::kNormal, pattern.size())
+           .ToLocal(&local_pattern)) {
     return std::nullopt;
   }
   Local<RegExp> regexp;
-  if (!RegExp::New(context,
-                   pattern_value.As<String>(),
-                   static_cast<RegExp::Flags>(flags))
+  if (!RegExp::New(
+           env->context(), local_pattern, static_cast<RegExp::Flags>(flags))
            .ToLocal(&regexp)) {
     return std::nullopt;
   }
@@ -195,14 +101,16 @@ URLPatternRegexProvider::create_instance(std::string_view pattern,
 bool URLPatternRegexProvider::regex_match(std::string_view input,
                                           const regex_type& pattern) {
   auto isolate = Isolate::GetCurrent();
-  Local<Context> context = isolate->GetCurrentContext();
-  Local<Value> input_value;
-  if (!ToV8Value(context, input, isolate).ToLocal(&input_value)) {
+  auto env = Environment::GetCurrent(isolate);
+  Local<String> local_input;
+  if (!String::NewFromUtf8(
+           isolate, input.data(), NewStringType::kNormal, input.size())
+           .ToLocal(&local_input)) {
     return false;
   }
   Local<Object> result_object;
   if (!pattern.Get(isolate)
-           ->Exec(context, input_value.As<String>())
+           ->Exec(env->context(), local_input)
            .ToLocal(&result_object)) {
     return false;
   }
@@ -214,14 +122,16 @@ std::optional<std::vector<std::optional<std::string>>>
 URLPatternRegexProvider::regex_search(std::string_view input,
                                       const regex_type& global_pattern) {
   auto isolate = Isolate::GetCurrent();
-  Local<Context> context = isolate->GetCurrentContext();
-  Local<Value> input_value;
-  if (!ToV8Value(context, input, isolate).ToLocal(&input_value)) {
+  auto env = Environment::GetCurrent(isolate);
+  Local<String> local_input;
+  if (!String::NewFromUtf8(
+           isolate, input.data(), NewStringType::kNormal, input.size())
+           .ToLocal(&local_input)) {
     return std::nullopt;
   }
   Local<Object> exec_result_object;
   auto pattern = global_pattern.Get(isolate);
-  if (!pattern->Exec(context, input_value.As<String>())
+  if (!pattern->Exec(env->context(), local_input)
            .ToLocal(&exec_result_object) ||
       exec_result_object->IsNull()) {
     return std::nullopt;
@@ -233,7 +143,7 @@ URLPatternRegexProvider::regex_search(std::string_view input,
   result.reserve(len);
   for (size_t i = 1; i < len; i++) {
     Local<Value> entry;
-    if (!exec_result->Get(context, i).ToLocal(&entry)) {
+    if (!exec_result->Get(env->context(), i).ToLocal(&entry)) {
       return std::nullopt;
     }
 
@@ -243,7 +153,8 @@ URLPatternRegexProvider::regex_search(std::string_view input,
     if (entry->IsUndefined()) {
       result.emplace_back(std::nullopt);
     } else if (entry->IsString()) {
-      result.emplace_back(V8StringToStdString(isolate, entry.As<String>()));
+      Utf8Value utf8_entry(isolate, entry.As<String>());
+      result.emplace_back(utf8_entry.ToString());
     }
   }
   return result;
@@ -282,12 +193,9 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   }
 
   std::optional<ada::url_pattern_init> init{};
-  MaybeStackBuffer<char> input_buf;
-  MaybeStackBuffer<char> base_url_buf;
-  std::optional<std::string_view> input{};
-  std::optional<std::string_view> base_url{};
+  std::optional<std::string> input{};
+  std::optional<std::string> base_url{};
   std::optional<ada::url_pattern_options> options{};
-  Isolate* isolate = env->isolate();
 
   // Following patterns are supported:
   // - new URLPattern(input)
@@ -299,8 +207,9 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   if (args[0]->IsNullOrUndefined()) {
     init = ada::url_pattern_init{};
   } else if (args[0]->IsString()) {
-    CopyV8StringToBuffer(isolate, args[0].As<String>(), &input_buf);
-    input = input_buf.ToStringView();
+    BufferValue input_buffer(env->isolate(), args[0]);
+    CHECK_NOT_NULL(*input_buffer);
+    input = input_buffer.ToString();
   } else if (args[0]->IsObject()) {
     init = URLPatternInit::FromJsObject(env, args[0].As<Object>());
     // If init does not have a value here, the implication is that an
@@ -321,12 +230,13 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
     // USVString ("null"/"undefined"), which will be rejected as invalid
     // URLs by ada downstream.
     if (args[1]->IsString()) {
-      CopyV8StringToBuffer(isolate, args[1].As<String>(), &base_url_buf);
-      base_url = base_url_buf.ToStringView();
+      BufferValue base_url_buffer(env->isolate(), args[1]);
+      CHECK_NOT_NULL(*base_url_buffer);
+      base_url = base_url_buffer.ToString();
     } else if (args[1]->IsNull()) {
-      base_url = std::string_view("null");
+      base_url = std::string("null");
     } else if (args[1]->IsUndefined()) {
-      base_url = std::string_view("undefined");
+      base_url = std::string("undefined");
     } else {
       THROW_ERR_INVALID_ARG_TYPE(env, "second argument must be a string");
       return;
@@ -347,8 +257,9 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
     // Overload resolution: string is overload 1 (baseURL),
     // otherwise overload 2 (options).
     if (args[1]->IsString()) {
-      CopyV8StringToBuffer(isolate, args[1].As<String>(), &base_url_buf);
-      base_url = base_url_buf.ToStringView();
+      BufferValue base_url_buffer(env->isolate(), args[1]);
+      CHECK_NOT_NULL(*base_url_buffer);
+      base_url = base_url_buffer.ToString();
     } else if (args[1]->IsNullOrUndefined()) {
       // Overload 2, options uses default.
     } else if (args[1]->IsObject()) {
@@ -365,16 +276,19 @@ void URLPattern::New(const FunctionCallbackInfo<Value>& args) {
   // Either url_pattern_init or input as a string must be provided.
   CHECK_IMPLIES(init.has_value(), !input.has_value());
 
+  std::string_view base_url_view{};
+  if (base_url) base_url_view = {base_url->data(), base_url->size()};
+
   ada::url_pattern_input arg0;
   if (init.has_value()) {
     arg0 = std::move(*init);
   } else {
-    arg0 = *input;
+    arg0 = std::move(*input);
   }
 
   auto url_pattern = parse_url_pattern<URLPatternRegexProvider>(
       std::move(arg0),
-      base_url ? &*base_url : nullptr,
+      base_url ? &base_url_view : nullptr,
       options.has_value() ? &options.value() : nullptr);
 
   if (!url_pattern) {
@@ -393,32 +307,21 @@ MaybeLocal<Value> URLPattern::URLPatternInit::ToJsObject(
   auto tmpl = env->urlpatterninit_template();
   if (tmpl.IsEmpty()) {
     static constexpr std::string_view namesVec[] = {
-        "protocol",
-        "username",
-        "password",
-        "hostname",
-        "port",
-        "pathname",
-        "search",
-        "hash",
         "baseURL",
+        "hash",
+        "hostname",
+        "password",
+        "pathname",
+        "port",
+        "protocol",
+        "search",
+        "username",
     };
     tmpl = DictionaryTemplate::New(isolate, namesVec);
     env->set_urlpatterninit_template(tmpl);
   }
 
-  MaybeLocal<Value> values[] = {
-      Undefined(isolate),  // protocol
-      Undefined(isolate),  // username
-      Undefined(isolate),  // password
-      Undefined(isolate),  // hostname
-      Undefined(isolate),  // port
-      Undefined(isolate),  // pathname
-      Undefined(isolate),  // search
-      Undefined(isolate),  // hash
-      Undefined(isolate),  // baseURL
-  };
-
+  MaybeLocal<Value> values[9];
   int idx = 0;
   Local<Value> temp;
   const auto trySet = [&](const std::optional<std::string>& val) {
@@ -432,55 +335,63 @@ MaybeLocal<Value> URLPattern::URLPatternInit::ToJsObject(
     return true;
   };
 
-  if (!trySet(init.protocol) || !trySet(init.username) ||
-      !trySet(init.password) || !trySet(init.hostname) || !trySet(init.port) ||
-      !trySet(init.pathname) || !trySet(init.search) || !trySet(init.hash) ||
-      !trySet(init.base_url)) {
+  if (!trySet(init.base_url) || !trySet(init.hash) || !trySet(init.hostname) ||
+      !trySet(init.password) || !trySet(init.pathname) || !trySet(init.port) ||
+      !trySet(init.protocol) || !trySet(init.search) ||
+      !trySet(init.username)) {
     return {};
   }
-  return NewDictionaryInstance(env->context(), tmpl, values);
+  return tmpl->NewInstance(context, values);
 }
 
 std::optional<ada::url_pattern_init> URLPattern::URLPatternInit::FromJsObject(
     Environment* env, Local<Object> obj) {
   ada::url_pattern_init init{};
-  Isolate* isolate = env->isolate();
-  Local<Context> context = env->context();
-  Local<String> names[] = {
-      env->protocol_string(),
-      env->username_string(),
-      env->password_string(),
-      env->hostname_string(),
-      env->port_string(),
-      env->pathname_string(),
-      env->search_string(),
-      env->hash_string(),
+  Local<String> components[] = {
       env->base_url_string(),
+      env->hash_string(),
+      env->hostname_string(),
+      env->password_string(),
+      env->pathname_string(),
+      env->port_string(),
+      env->protocol_string(),
+      env->search_string(),
+      env->username_string(),
   };
-  std::optional<std::string>* fields[] = {
-      &init.protocol,
-      &init.username,
-      &init.password,
-      &init.hostname,
-      &init.port,
-      &init.pathname,
-      &init.search,
-      &init.hash,
-      &init.base_url,
+  auto isolate = env->isolate();
+  const auto set_parameter = [&](std::string_view key, std::string_view value) {
+    if (key == "protocol") {
+      init.protocol = std::string(value);
+    } else if (key == "username") {
+      init.username = std::string(value);
+    } else if (key == "password") {
+      init.password = std::string(value);
+    } else if (key == "hostname") {
+      init.hostname = std::string(value);
+    } else if (key == "port") {
+      init.port = std::string(value);
+    } else if (key == "pathname") {
+      init.pathname = std::string(value);
+    } else if (key == "search") {
+      init.search = std::string(value);
+    } else if (key == "hash") {
+      init.hash = std::string(value);
+    } else if (key == "baseURL") {
+      init.base_url = std::string(value);
+    }
   };
-  static_assert(arraysize(names) == arraysize(fields));
-
-  for (size_t i = 0; i < arraysize(names); i++) {
-    Local<Value> value;
-    if (!obj->Get(context, names[i]).ToLocal(&value)) {
+  Local<Value> value;
+  for (const auto& component : components) {
+    Utf8Value key(isolate, component);
+    if (obj->Get(env->context(), component).ToLocal(&value)) {
+      if (value->IsString()) {
+        Utf8Value utf8_value(isolate, value);
+        set_parameter(key.ToStringView(), utf8_value.ToStringView());
+      }
+    } else {
       // If ToLocal failed then we assume an error occurred,
       // bail out early to propagate the error.
       return std::nullopt;
-    }
-    // Non-string values are ignored. This matches the previous binding
-    // and avoids a ToString of numbers or other primitives.
-    if (value->IsString()) {
-      *fields[i] = V8StringToStdString(isolate, value.As<String>());
     }
   }
   return init;
@@ -649,22 +560,72 @@ bool URLPattern::Test(Environment* env,
 
 // V8 Methods
 
+namespace {
+// The arguments of URLPattern.prototype.exec() and test(). When the input is
+// a string, `input` refers to `input_storage`, so instances must not be copied
+// or moved.
+struct URLPatternMatchArgs {
+  URLPatternMatchArgs() = default;
+  URLPatternMatchArgs(const URLPatternMatchArgs&) = delete;
+  URLPatternMatchArgs& operator=(const URLPatternMatchArgs&) = delete;
+
+  std::optional<std::string_view> base_url_view() const {
+    return base_url ? std::optional<std::string_view>(*base_url) : std::nullopt;
+  }
+
+  ada::url_pattern_input input;
+  std::string input_storage;
+  std::optional<std::string> base_url;
+};
+
+// Parses the `input` and `baseURL` arguments of exec() and test(). Returns
+// false if a JavaScript exception is pending.
+bool ParseURLPatternMatchArgs(Environment* env,
+                              const FunctionCallbackInfo<Value>& args,
+                              URLPatternMatchArgs* out) {
+  if (args.Length() == 0 || args[0]->IsNullOrUndefined()) {
+    out->input = ada::url_pattern_init{};
+  } else if (args[0]->IsString()) {
+    Utf8Value input_value(env->isolate(), args[0].As<String>());
+    out->input_storage = input_value.ToString();
+    out->input = std::string_view(out->input_storage);
+  } else if (args[0]->IsObject()) {
+    auto maybeInput =
+        URLPattern::URLPatternInit::FromJsObject(env, args[0].As<Object>());
+    if (!maybeInput.has_value()) return false;
+    out->input = std::move(*maybeInput);
+  } else {
+    THROW_ERR_INVALID_ARG_TYPE(
+        env, "URLPattern input needs to be a string or an object");
+    return false;
+  }
+
+  if (args.Length() > 1 && !args[1]->IsUndefined()) {
+    if (args[1]->IsNull()) {
+      out->base_url = std::string("null");
+    } else if (args[1]->IsString()) {
+      Utf8Value base_url_value(env->isolate(), args[1].As<String>());
+      out->base_url = base_url_value.ToStringView();
+    } else {
+      THROW_ERR_INVALID_ARG_TYPE(env, "baseURL must be a string");
+      return false;
+    }
+  }
+  return true;
+}
+}  // namespace
+
 void URLPattern::Exec(const FunctionCallbackInfo<Value>& args) {
   URLPattern* url_pattern;
   ASSIGN_OR_RETURN_UNWRAP(&url_pattern, args.This());
   auto env = Environment::GetCurrent(args);
 
-  ada::url_pattern_input input;
-  std::optional<std::string_view> base_url;
-  MaybeStackBuffer<char> input_buf;
-  MaybeStackBuffer<char> base_buf;
-  if (!ExtractInputAndBaseURL(
-          env, args, &input, &base_url, &input_buf, &base_buf)) {
-    return;
-  }
+  URLPatternMatchArgs match_args;
+  if (!ParseURLPatternMatchArgs(env, args, &match_args)) return;
 
+  std::optional<std::string_view> base_url = match_args.base_url_view();
   Local<Value> result;
-  if (!url_pattern->Exec(env, input, base_url).ToLocal(&result)) {
+  if (!url_pattern->Exec(env, match_args.input, base_url).ToLocal(&result)) {
     THROW_ERR_OPERATION_FAILED(env, "Failed to exec URLPattern");
     return;
   }
@@ -676,16 +637,11 @@ void URLPattern::Test(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&url_pattern, args.This());
   auto env = Environment::GetCurrent(args);
 
-  ada::url_pattern_input input;
-  std::optional<std::string_view> base_url;
-  MaybeStackBuffer<char> input_buf;
-  MaybeStackBuffer<char> base_buf;
-  if (!ExtractInputAndBaseURL(
-          env, args, &input, &base_url, &input_buf, &base_buf)) {
-    return;
-  }
+  URLPatternMatchArgs match_args;
+  if (!ParseURLPatternMatchArgs(env, args, &match_args)) return;
 
-  args.GetReturnValue().Set(url_pattern->Test(env, input, base_url));
+  std::optional<std::string_view> base_url = match_args.base_url_view();
+  args.GetReturnValue().Set(url_pattern->Test(env, match_args.input, base_url));
 }
 
 #define URL_PATTERN_COMPONENT_GETTERS(uppercase_name, lowercase_name)          \
@@ -727,7 +683,13 @@ static void Initialize(Local<Object> target,
   auto ctor_tmpl = NewFunctionTemplate(isolate, URLPattern::New);
   auto instance_template = ctor_tmpl->InstanceTemplate();
   auto prototype_template = ctor_tmpl->PrototypeTemplate();
-  ctor_tmpl->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "URLPattern"));
+  Local<String> url_pattern_string =
+      FIXED_ONE_BYTE_STRING(isolate, "URLPattern");
+  ctor_tmpl->SetClassName(url_pattern_string);
+  prototype_template->Set(
+      v8::Symbol::GetToStringTag(isolate),
+      url_pattern_string,
+      static_cast<PropertyAttribute>(ReadOnly | v8::DontEnum));
 
   // The signature is used to prevent the property accessors from being
   // called on the wrong receiver object (`this`)

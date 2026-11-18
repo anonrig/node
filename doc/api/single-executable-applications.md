@@ -7,6 +7,9 @@ added:
   - v19.7.0
   - v18.16.0
 changes:
+  - version: v27.0.0-alpha.0.1.0
+    pr-url: https://github.com/nodejs/node/pull/66768
+    description: Allowed "useCodeCache" together with "useVfs".
   - version: v25.5.0
     pr-url: https://github.com/nodejs/node/pull/61167
     description: Added built-in single executable application generation via the CLI flag `--build-sea`.
@@ -116,6 +119,8 @@ The configuration currently reads the following top-level fields:
   "disableExperimentalSEAWarning": true, // Default: false
   "useSnapshot": false,  // Default: false
   "useCodeCache": true, // Default: false
+  "useVfs": true, // Default: false
+  "vfsArchive": "/path/to/assets.zip", // Optional
   "execArgv": ["--no-warnings", "--max-old-space-size=4096"], // Optional
   "execArgvExtension": "env", // Default: "env", options: "none", "env", "cli"
   "assets": {  // Optional
@@ -175,6 +180,194 @@ const raw = getRawAsset('a.jpg');
 See documentation of the [`sea.getAsset()`][], [`sea.getAssetAsBlob()`][],
 [`sea.getRawAsset()`][] and [`sea.getAssetKeys()`][] APIs for more information.
 
+### Virtual file system (VFS) for assets
+
+<!-- YAML
+added: v26.9.0
+-->
+
+> Stability: 1.0 - Early development
+
+In addition to using the `node:sea` API to access individual assets, the
+bundled assets can be exposed as a read-only [virtual file system][] and
+accessed through standard `node:fs` APIs. To enable this, set
+`"useVfs": true` in the SEA configuration.
+
+A virtual file system never shadows the real file system: it is mounted at a
+reserved mount point that cannot exist on the real file system, and the mount
+point is chosen at runtime rather than being a fixed path. When `useVfs` is
+enabled, the injected main script itself is placed at the root of the mount
+and executed from there, so `__filename` and `__dirname` point inside the
+virtual file system instead of reflecting [`process.execPath`][]. Bundled
+code therefore reaches the assets through `__dirname`-relative paths and
+relative [`require()`][] calls, without having to know the mount point:
+
+```cjs
+const fs = require('node:fs');
+const path = require('node:path');
+
+// __dirname is the root of the virtual file system holding the assets.
+const rawConfig = fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8');
+const data = fs.readFileSync(path.join(__dirname, 'data/file.txt'));
+
+// Directory operations work too.
+const files = fs.readdirSync(path.join(__dirname, 'assets'));
+
+// Check if a bundled file exists.
+if (fs.existsSync(path.join(__dirname, 'optional.json'))) {
+  // ...
+}
+```
+
+The VFS supports the `node:fs` operations for reading files and directories.
+Since the SEA VFS is read-only, write operations fail with `EROFS`. See the
+[VFS documentation][] for the full list of supported operations.
+
+`useVfs` does for a single executable application what [`--vfs-load`][] does
+for `node`: the entry point is its `"main"`, and modules resolve against its
+own files. `--vfs-load` therefore cannot be used in a single executable
+application, whether or not it uses `useVfs`: `--build-sea` rejects it in
+`"execArgv"`, and the executable rejects it at startup when it comes from
+`--node-options` or from the `execArgv` of a worker.
+
+#### Loading modules from the VFS in a SEA
+
+When `useVfs` is enabled, the main script is executed from inside the
+virtual file system, and `require()` uses the [module loader
+integration][] of the VFS to load modules from the bundled assets. This
+supports relative requires (e.g. `require('./helper.js')`) as well as
+`node_modules` package lookups, which are confined to the mount:
+
+```cjs
+// Require bundled modules using relative paths.
+const myModule = require('./lib/mymodule.js');
+
+// Packages bundled under the node_modules asset prefix also resolve.
+const dep = require('some-package');
+```
+
+#### ESM entry points
+
+`"useVfs": true` also supports `"mainFormat": "module"`. The ESM main
+script is loaded from inside the mount through the ESM loader, so
+`import.meta.url`, `import.meta.filename`, and `import.meta.dirname`
+reflect the location of the main script in the virtual file system, and
+static and dynamic imports resolve against the bundled assets:
+
+```mjs
+import fs from 'node:fs';
+import path from 'node:path';
+
+// import.meta.dirname is the root of the virtual file system.
+const data = fs.readFileSync(
+  path.join(import.meta.dirname, 'data/file.txt'));
+
+// Relative and bare specifier imports resolve inside the mount.
+import myModule from './lib/mymodule.mjs';
+const lazy = await import('./lib/lazy.mjs');
+```
+
+Module format detection works the same way as on the real file
+system: name bundled ES modules with the `.mjs` extension (or provide the
+relevant `package.json` files as assets) so they are interpreted as ESM.
+
+#### Worker threads
+
+The virtual file system is mounted at the mount point reserved for
+[`--vfs-load`][], which is the same in every thread, and worker threads mount
+it as well. A path into it, such as the main script's
+`__filename` or a worker script bundled as an asset, can therefore be loaded
+in a [`Worker`][], which reaches the other assets the same way the main
+script does:
+
+```cjs
+const { Worker } = require('node:worker_threads');
+const path = require('node:path');
+
+// worker.js is bundled as an asset, at the root of the mount.
+new Worker(path.join(__dirname, 'worker.js'));
+```
+
+A virtual file system mounted with [`vfs.mount()`][] in one thread is not
+mounted in the others, so a worker cannot load a script from it.
+
+#### Serving the assets from a ZIP archive with `"vfsArchive"`
+
+Instead of listing individual `"assets"`, the configuration can point
+`"vfsArchive"` at a prebuilt ZIP archive. The archive is embedded into the
+executable as-is, and the virtual file system serves the files inside it,
+inflating each one when it is read. When the assets are compressible (such
+as JavaScript, JSON, or other text), a deflate-compressed archive can
+substantially reduce the size of the generated executable.
+
+The archive can be built with any ZIP tool, or with the ZIP support in
+[`node:zlib`][]:
+
+```mjs
+import { zipFiles } from 'node:zlib';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+
+await pipeline(
+  zipFiles([
+    ['./dist/config.json', 'config.json'],
+    ['./dist/data.txt', 'data/data.txt'],
+  ]),
+  createWriteStream('assets.zip'),
+);
+```
+
+The mounted file tree looks the same as with `"assets"`: the entries appear
+under the mount point using their archive names, the main script is placed
+at the mount point root, and access through `__dirname`-relative paths,
+`require()`, and `import` is unchanged. However, `sea.getAsset()` and
+`sea.getAssetAsBlob()` do not serve the individual files, because the
+executable only embeds the archive; read the files through the file system
+APIs instead. `"vfsArchive"` requires `"useVfs": true` and cannot be
+combined with `"assets"`.
+
+The archive is mounted at the same mount point as the assets would be, and
+in [worker threads](#worker-threads) as well. A path into the archive, such
+as the main script's `__filename`, can therefore be loaded in a worker:
+
+```cjs
+const { Worker, isMainThread } = require('node:worker_threads');
+
+if (isMainThread) {
+  new Worker(__filename);
+} else {
+  // The worker runs the same script, from the same archive.
+  console.log(require('./lib/math.js').add(2, 3));
+}
+```
+
+#### Code cache for the modules in the VFS
+
+When `"useCodeCache": true` is combined with `"useVfs": true`, the code cache
+is not limited to the main script: `--build-sea` compiles every JavaScript
+module in the virtual file system (and every TypeScript module, when type
+stripping is enabled), including the main script and the modules under
+`node_modules`, and embeds their V8 code cache into the preparation blob.
+The modules are compiled without being run, so the build has no side
+effects. A module that fails to compile is left out of the cache and fails
+the same way at run time if the application loads it.
+
+The cache is keyed by the path of each module inside the mount and verified
+against its source, so it is used by the executable whenever the modules are
+loaded from the VFS, and ignored if they changed. The cache is
+platform-specific, like the code cache of the main script.
+
+#### Snapshot limitations
+
+`"useVfs": true` cannot be used together with `"useSnapshot": true`.
+
+#### Native addon limitations
+
+Native addons (`.node` files) cannot be loaded directly from the VFS because
+`process.dlopen()` requires files on the real file system. To use native
+addons in a SEA with VFS, write the asset to a temporary file first. See
+[Using native addons in the injected main script][] for an example.
+
 ### Startup snapshot support
 
 The `useSnapshot` field can be used to enable startup snapshot support. In this
@@ -216,7 +409,8 @@ executable application is launched, instead of compiling the `main` script from
 scratch, Node.js would use the code cache to speed up the compilation, then
 execute the script, which would improve the startup performance.
 
-**Note:** `import()` does not work when `useCodeCache` is `true`.
+When `useVfs` is also set to `true`, the code cache covers every module in the
+virtual file system, see [Code cache for the modules in the VFS][].
 
 ### Execution arguments
 
@@ -451,8 +645,9 @@ injected main script with the following properties:
 
 <!-- TODO(joyeecheung): support and document module.registerHooks -->
 
-When using `"mainFormat": "module"`, `import()` can be used to dynamically
-load built-in modules. Attempting to use `import()` to load modules from
+`import()` can be used to dynamically load built-in modules in both
+CommonJS and ESM (`"mainFormat": "module"`) single executable applications.
+Attempting to use `import()` to load modules from
 the file system will throw an error.
 
 ### Using native addons in the injected main script
@@ -642,13 +837,19 @@ Suggestions for other resource injection tools/workflows are welcomed. Please
 start a discussion at <https://github.com/nodejs/single-executable/discussions>
 to help us document them.
 
+[Code cache for the modules in the VFS]: #code-cache-for-the-modules-in-the-vfs
 [CommonJS]: modules.md#modules-commonjs-modules
 [ECMAScript Modules]: esm.md#modules-ecmascript-modules
 [ELF]: https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
 [Generating single executable preparation blobs]: #1-generating-single-executable-preparation-blobs
 [Mach-O]: https://en.wikipedia.org/wiki/Mach-O
 [PE]: https://en.wikipedia.org/wiki/Portable_Executable
+[Using native addons in the injected main script]: #using-native-addons-in-the-injected-main-script
+[VFS documentation]: vfs.md
 [Windows SDK]: https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/
+[`--vfs-load`]: cli.md#--vfs-loadsource
+[`Worker`]: worker_threads.md#class-worker
+[`node:zlib`]: zlib.md
 [`process.execPath`]: process.md#processexecpath
 [`require()`]: modules.md#requireid
 [`require.main`]: modules.md#accessing-the-main-module
@@ -658,10 +859,13 @@ to help us document them.
 [`sea.getRawAsset()`]: #seagetrawassetkey
 [`v8.startupSnapshot.setDeserializeMainFunction()`]: v8.md#v8startupsnapshotsetdeserializemainfunctioncallback-data
 [`v8.startupSnapshot` API]: v8.md#startup-snapshot-api
+[`vfs.mount()`]: vfs.md#vfsmount
 [documentation about startup snapshot support in Node.js]: cli.md#--build-snapshot
 [fuse]: https://www.electronjs.org/docs/latest/tutorial/fuses
+[module loader integration]: vfs.md#module-loader-integration
 [postject]: https://github.com/nodejs/postject
 [postject-linux-arm64-issue]: https://github.com/nodejs/postject/issues/105
 [signtool]: https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool
 [single executable applications]: https://github.com/nodejs/single-executable
 [supported by Node.js]: https://github.com/nodejs/node/blob/main/BUILDING.md#platform-list
+[virtual file system]: vfs.md

@@ -90,7 +90,7 @@ describe('require(\'node:test\').run', { concurrency: true }, () => {
 
   it('should support timeout', async () => {
     const stream = run({ timeout: 50, files: [
-      fixtures.path('test-runner', 'plan', 'timeout-basic.mjs'),
+      fixtures.path('test-runner', 'run-timeout.mjs'),
     ] });
     stream.on('test:fail', common.mustCall((data) => {
       assert.strictEqual(data.details.error.failureType, 'testTimeoutFailure');
@@ -870,6 +870,48 @@ describe('forceExit', () => {
   });
 });
 
+describe('with isolation="none"', () => {
+  const isolationNoneFixture = fixtures.path('test-runner', 'test-runner-isolation-none.mjs');
+
+  it('should pass only to children', async () => {
+    const child = await common.spawnPromisified(process.execPath, [
+      isolationNoneFixture,
+      '--file', join(testFixtures, 'test_only.js'),
+      '--only',
+    ]);
+
+    assert.strictEqual(child.stderr, '');
+    assert.strictEqual(child.code, 0);
+    assert.match(child.stdout, /ok 1 - this should be executed/);
+    assert.match(child.stdout, /# tests 1/);
+  });
+
+  it('should skip tests not matching testNamePatterns - RegExp', async () => {
+    const child = await common.spawnPromisified(process.execPath, [
+      isolationNoneFixture,
+      '--file', join(testFixtures, 'default-behavior/test/skip_by_name.cjs'),
+      '--name-pattern', 'executed',
+    ]);
+
+    assert.strictEqual(child.stderr, '');
+    assert.strictEqual(child.code, 0);
+    assert.match(child.stdout, /ok 1 - this should be executed/);
+    assert.match(child.stdout, /# tests 1/);
+  });
+
+  it('should skip tests matching testSkipPatterns - RegExp', async () => {
+    const child = await common.spawnPromisified(process.execPath, [
+      isolationNoneFixture,
+      '--file', join(testFixtures, 'default-behavior/test/skip_by_name.cjs'),
+      '--skip-pattern', 'skipped',
+    ]);
+
+    assert.strictEqual(child.stderr, '');
+    assert.strictEqual(child.code, 0);
+    assert.match(child.stdout, /ok 1 - this should be executed/);
+    assert.match(child.stdout, /# tests 1/);
+  });
+});
 
 // exitHandler doesn't run until after the tests / after hooks finish.
 process.on('exit', () => {

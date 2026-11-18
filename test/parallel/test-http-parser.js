@@ -1,3 +1,5 @@
+// Flags: --expose-internals --no-warnings
+
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -23,7 +25,7 @@
 const { mustCall, mustNotCall, mustCallAtLeast } = require('../common');
 const assert = require('assert');
 
-const { methods, HTTPParser } = require('_http_common');
+const { methods, HTTPParser } = require('internal/http/common');
 const { REQUEST, RESPONSE } = HTTPParser;
 
 const kOnHeaders = HTTPParser.kOnHeaders | 0;
@@ -329,8 +331,9 @@ function expectBody(expected) {
     assert.strictEqual(versionMinor, 1);
   });
 
+  // Chunks parsed in the same execute() call are delivered as one buffer.
   let body_part = 0;
-  const body_parts = ['123', '123456', '1234567890'];
+  const body_parts = ['1231234561234567890'];
 
   const onBody = mustCallAtLeast((buf) => {
     const body = String(buf);
@@ -367,9 +370,10 @@ function expectBody(expected) {
     assert.strictEqual(versionMinor, 1);
   });
 
+  // One buffer per execute() call, holding all the chunks it parsed.
   let body_part = 0;
   const body_parts =
-          ['123', '123456', '123456789', '123456789ABC', '123456789ABCDEF'];
+          ['123123456', '123456789123456789ABC123456789ABCDEF'];
 
   const onBody = mustCallAtLeast((buf) => {
     const body = String(buf);
@@ -558,6 +562,21 @@ function expectBody(expected) {
   parser[kOnBody] = expectBody('pong');
   parser[kOnHeadersComplete] = onHeadersComplete2;
   parser.execute(req2, 0, req2.length);
+}
+
+// Buffered body spans are flushed once they would exceed 64 KiB.
+{
+  const chunk = `400\r\n${'x'.repeat(1024)}\r\n`;
+  const request = Buffer.from(
+    'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    chunk.repeat(100) + '0\r\n\r\n');
+
+  const sizes = [];
+  const parser = newParser(REQUEST);
+  parser[kOnBody] = (buf) => sizes.push(buf.length);
+  parser.execute(request, 0, request.length);
+
+  assert.deepStrictEqual(sizes, [64 * 1024, 36 * 1024]);
 }
 
 // Test parser 'this' safety

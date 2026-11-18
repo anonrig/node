@@ -12,6 +12,24 @@
 
 namespace node {
 namespace crypto {
+// Like ncrypto::Digest::FromName(), but caches provider implementations per
+// Environment so that later lookups do not have to fetch them again.
+const ncrypto::Digest GetDigest(Environment* env, const char* name);
+
+// GetDigest() for synchronous jobs. Jobs on the thread pool keep using
+// ncrypto::Digest::FromName(): there, the cache lowered Web Crypto digest and
+// HMAC throughput, because workers that finish sooner have to be woken up for
+// each new job more often.
+const ncrypto::Digest GetDigestForJob(Environment* env,
+                                      CryptoJobMode mode,
+                                      const char* name);
+
+// Returns an HMAC context to be keyed with md. Contexts for digests from
+// GetDigest() are duplicated from a cached template, so keying them does not
+// fetch HMAC or md again.
+ncrypto::HMACCtxPointer NewHmacContext(Environment* env,
+                                       const ncrypto::Digest& md);
+
 class Hash final : public BaseObject {
  public:
   static void Initialize(Environment* env, v8::Local<v8::Object> target);
@@ -21,7 +39,10 @@ class Hash final : public BaseObject {
   SET_MEMORY_INFO_NAME(Hash)
   SET_SELF_SIZE(Hash)
 
-  bool HashInit(const EVP_MD* md, v8::Maybe<unsigned int> xof_md_len);
+  bool HashInit(const EVP_MD* digest, v8::Maybe<unsigned int> xof_md_len);
+  bool HashInit(const EVP_MD* digest,
+                const CShakeOptions& options,
+                v8::Maybe<unsigned int> xof_md_len);
   bool HashUpdate(const char* data, size_t len);
 
   static void GetHashes(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -36,6 +57,11 @@ class Hash final : public BaseObject {
   Hash(Environment* env, v8::Local<v8::Object> wrap);
 
  private:
+  // Determines the digest length after mdctx_ has been initialized, applying
+  // and validating the requested XOF output length. Resets mdctx_ and returns
+  // false on failure.
+  bool FinishHashInit(const EVP_MD* digest, v8::Maybe<unsigned int> xof_md_len);
+
   ncrypto::EVPMDCtxPointer mdctx_{};
   unsigned int md_len_ = 0;
   ByteSource digest_;
@@ -43,7 +69,8 @@ class Hash final : public BaseObject {
 
 struct HashConfig final : public MemoryRetainer {
   ByteSource in;
-  const EVP_MD* digest;
+  ncrypto::Digest digest;
+  std::optional<CShakeOptions> options;
   unsigned int length;
 
   HashConfig() = default;
@@ -81,74 +108,6 @@ struct HashTraits final {
 };
 
 using HashJob = DeriveBitsJob<HashTraits>;
-
-#if OPENSSL_WITH_EVP_MAC
-enum class CShakeVariant { CSHAKE128, CSHAKE256 };
-
-struct CShakeBytepadInput final {
-  const void* data;
-  size_t byte_length;
-  size_t bit_length;
-};
-
-struct CShakeParams final {
-  CShakeVariant variant;
-  const void* function_name_data;
-  size_t function_name_size;
-  const void* customization_data;
-  size_t customization_size;
-  const CShakeBytepadInput* bytepad_input;
-  const void* input_data;
-  size_t input_size;
-  bool append_output_length;
-  uint32_t length;  // Output length in bits
-};
-
-bool DeriveCShakeBits(const CShakeParams& params, ByteSource* out);
-
-struct CShakeConfig final : public MemoryRetainer {
-  ByteSource in;
-  ByteSource function_name;
-  ByteSource customization;
-  CShakeVariant variant;
-  uint32_t length;  // Output length in bits
-
-  CShakeConfig() = default;
-
-  explicit CShakeConfig(CShakeConfig&& other) noexcept;
-
-  CShakeConfig& operator=(CShakeConfig&& other) noexcept;
-
-  void MemoryInfo(MemoryTracker* tracker) const override;
-  SET_MEMORY_INFO_NAME(CShakeConfig)
-  SET_SELF_SIZE(CShakeConfig)
-};
-
-struct CShakeTraits final {
-  using AdditionalParameters = CShakeConfig;
-  static constexpr const char* JobName = "CShakeJob";
-  static constexpr AsyncWrap::ProviderType Provider =
-      AsyncWrap::PROVIDER_HASHREQUEST;
-
-  static v8::Maybe<void> AdditionalConfig(
-      CryptoJobMode mode,
-      const v8::FunctionCallbackInfo<v8::Value>& args,
-      unsigned int offset,
-      CShakeConfig* params);
-
-  static bool DeriveBits(Environment* env,
-                         const CShakeConfig& params,
-                         ByteSource* out,
-                         CryptoJobMode mode,
-                         CryptoErrorStore* errors);
-
-  static v8::MaybeLocal<v8::Value> EncodeOutput(Environment* env,
-                                                const CShakeConfig& params,
-                                                ByteSource* out);
-};
-
-using CShakeJob = DeriveBitsJob<CShakeTraits>;
-#endif  // OPENSSL_WITH_EVP_MAC
 
 }  // namespace crypto
 }  // namespace node

@@ -27,6 +27,8 @@
 #include "permission/permission.h"
 #include "string_bytes.h"
 
+#include <string>
+
 namespace node {
 
 using v8::Context;
@@ -75,6 +77,9 @@ class FSEventWrap: public HandleWrap {
 
   uv_fs_event_t handle_;
   enum encoding encoding_ = kDefaultEncoding;
+  // The path being watched, used to re-check read permission for the
+  // descendants reported by libuv when the permission model is enabled.
+  std::string watched_path_;
 };
 
 
@@ -150,6 +155,7 @@ void FSEventWrap::Start(const FunctionCallbackInfo<Value>& args) {
   CHECK_NOT_NULL(*path);
   THROW_IF_INSUFFICIENT_PERMISSIONS(
       env, permission::PermissionScope::kFileSystemRead, *path);
+  wrap->watched_path_ = *path;
 
   unsigned int flags = 0;
   if (args[2]->IsTrue())
@@ -217,11 +223,25 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
     Null(env->isolate())
   };
 
+  // When the permission model is enabled, a recursive watch can report
+  // descendants that fall outside the granted read scope (for example a nested
+  // path under an exact, non-wildcard grant). Do not leak those names; report
+  // the event without a filename instead.
+  if (filename != nullptr && env->permission()->enabled()) {
+    std::string full_path = wrap->watched_path_;
+    full_path += kPathSeparator;
+    full_path += filename;
+    if (!env->permission()->is_granted(
+            env, permission::PermissionScope::kFileSystemRead, full_path)) {
+      filename = nullptr;
+    }
+  }
+
   if (filename != nullptr) {
     // TODO(@jasnell): Historically, this code has failed to correctly
     // propagate any error returned by the StringBytes::Encode method,
     // and would instead just crash the process. That behavior is preserved
-    // here but should be looked at. Preferrably errors would be handled
+    // here but should be looked at. Preferably errors would be handled
     // correctly here.
     TryCatch try_catch(env->isolate());
     MaybeLocal<Value> fn =

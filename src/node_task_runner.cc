@@ -1,4 +1,5 @@
 #include "node_task_runner.h"
+#include "simdjson.h"
 #include "util-inl.h"
 
 #include <regex>  // NOLINT(build/c++11)
@@ -232,7 +233,9 @@ FindPackageJson(const std::filesystem::path& cwd) {
        directory_path = directory_path.parent_path()) {
     // Append "path/node_modules/.bin" to the env var, if it is a directory.
     auto node_modules_bin = directory_path / "node_modules" / ".bin";
-    if (std::filesystem::is_directory(node_modules_bin)) {
+    // Skip directories that can't be inspected (e.g. permission denied).
+    std::error_code error_code;
+    if (std::filesystem::is_directory(node_modules_bin, error_code)) {
       path_env_var += ConvertPathToUTF8(node_modules_bin) + env_var_separator;
     }
 
@@ -254,10 +257,39 @@ FindPackageJson(const std::filesystem::path& cwd) {
   return {{package_json_path, raw_content, path_env_var}};
 }
 
+// Prints every "name: command" pair in the scripts object to the given stream.
+static void PrintScripts(FILE* out,
+                         simdjson::ondemand::object& scripts_object) {
+  // Reset the object to iterate from the beginning, in case it was read before.
+  scripts_object.reset();
+  simdjson::ondemand::value value;
+  for (auto field : scripts_object) {
+    std::string_view key_str;
+    std::string_view value_str;
+    if (!field.unescaped_key().get(key_str) && !field.value().get(value) &&
+        !value.get_string().get(value_str)) {
+      fprintf(out,
+              "  %.*s: %.*s\n",
+              static_cast<int>(key_str.size()),
+              key_str.data(),
+              static_cast<int>(value_str.size()),
+              value_str.data());
+    }
+  }
+}
+
 void RunTask(const std::shared_ptr<InitializationResultImpl>& result,
              std::string_view command_id,
              const std::vector<std::string_view>& positional_args) {
-  auto cwd = std::filesystem::current_path();
+  std::error_code error_code;
+  auto cwd = std::filesystem::current_path(error_code);
+  if (error_code) {
+    fprintf(stderr,
+            "Can't determine the current working directory: %s\n",
+            error_code.message().c_str());
+    result->exit_code_ = ExitCode::kGenericUserError;
+    return;
+  }
   auto package_json = FindPackageJson(cwd);
 
   if (!package_json.has_value()) {
@@ -306,6 +338,16 @@ void RunTask(const std::shared_ptr<InitializationResultImpl>& result,
     return;
   }
 
+  // With no command (e.g. bare `node --run`), list the available scripts but
+  // exit non-zero so a script invoking `node --run $CMD` with an unset
+  // variable still fails, as it did before bare `--run` was allowed.
+  if (command_id.empty()) {
+    fprintf(stderr, "Available scripts are:\n");
+    PrintScripts(stderr, scripts_object);
+    result->exit_code_ = ExitCode::kInvalidCommandLineArgument;
+    return;
+  }
+
   // If the command_id is not found in the scripts object, throw an error.
   std::string_view command;
   if (auto command_error =
@@ -323,23 +365,7 @@ void RunTask(const std::shared_ptr<InitializationResultImpl>& result,
               command_id.data(),
               ConvertPathToUTF8(path).c_str());
       fprintf(stderr, "Available scripts are:\n");
-
-      // Reset the object to iterate over it again
-      scripts_object.reset();
-      simdjson::ondemand::value value;
-      for (auto field : scripts_object) {
-        std::string_view key_str;
-        std::string_view value_str;
-        if (!field.unescaped_key().get(key_str) && !field.value().get(value) &&
-            !value.get_string().get(value_str)) {
-          fprintf(stderr,
-                  "  %.*s: %.*s\n",
-                  static_cast<int>(key_str.size()),
-                  key_str.data(),
-                  static_cast<int>(value_str.size()),
-                  value_str.data());
-        }
-      }
+      PrintScripts(stderr, scripts_object);
     }
     result->exit_code_ = ExitCode::kGenericUserError;
     return;

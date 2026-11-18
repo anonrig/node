@@ -8,12 +8,12 @@ if (!common.hasCrypto)
 // are available by default. Different OpenSSL versions have different
 // default security levels and we use this value to adjust what a test
 // expects based on the security level. You can read more in
-// https://docs.openssl.org/1.1.1/man3/SSL_CTX_set_security_level/#default-callback-behaviour
+// https://docs.openssl.org/3.0/man3/SSL_CTX_set_security_level/#default-callback-behaviour
 const secLevel = require('internal/crypto/util').getOpenSSLSecLevel();
 const assert = require('assert');
 const tls = require('tls');
 const fixtures = require('../common/fixtures');
-const { hasOpenSSL, hasFIPS } = require('../common/crypto');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
 const fips3 = hasFIPS(3);
 const fips4 = hasFIPS(4);
 
@@ -88,7 +88,7 @@ function testDHE3072() {
   test(3072, false, null);
 }
 
-if (!process.features.openssl_is_boringssl) {
+if (!isBoringSSL) {
   if (fips3 && !fips4) {
     // The FIPS provider rejects explicit DH parameters without a validated
     // subgroup, while OpenSSL's built-in FFDHE group remains available.
@@ -129,7 +129,7 @@ for (const minDHSize of [true, false, null, undefined, {}, [], '', '1']) {
   });
 }
 
-if (!process.features.openssl_is_boringssl) {
+if (!isBoringSSL) {
   process.on('exit', function() {
     assert.strictEqual(nsuccess, 1);
     assert.strictEqual(nerror, 1);

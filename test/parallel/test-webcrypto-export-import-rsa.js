@@ -1,6 +1,7 @@
 'use strict';
 
 const common = require('../common');
+
 const fixtures = require('../common/fixtures');
 
 if (!common.hasCrypto)
@@ -8,6 +9,7 @@ if (!common.hasCrypto)
 
 const assert = require('assert');
 const crypto = require('crypto');
+const { isBoringSSL } = require('../common/crypto');
 const { subtle } = globalThis.crypto;
 
 const sizes = [1024, 2048, 4096];
@@ -17,17 +19,10 @@ const hashes = [
   'SHA-256',
   'SHA-384',
   'SHA-512',
+  'SHA3-256',
+  'SHA3-384',
+  'SHA3-512',
 ];
-
-if (!process.features.openssl_is_boringssl) {
-  hashes.push(
-    'SHA3-256',
-    'SHA3-384',
-    'SHA3-512',
-  );
-} else {
-  common.printSkipMessage('Skipping unsupported SHA-3 test cases');
-}
 
 const keyData = {
   1024: {
@@ -641,6 +636,22 @@ const testVectors = [
     hashes.forEach((hash) => {
       [true, false].forEach((extractable) => {
         testVectors.forEach((vector) => {
+          if (isBoringSSL && hash.startsWith('SHA3-')) {
+            const { spki, pkcs8, jwk } = keyData[size];
+            for (const [format, data, usages] of [
+              ['spki', spki, vector.publicUsages],
+              ['pkcs8', pkcs8, vector.privateUsages],
+              ['jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e }, vector.publicUsages],
+              ['jwk', jwk, vector.privateUsages],
+            ]) {
+              variations.push(assert.rejects(subtle.importKey(
+                format, data, { name: vector.name, hash }, extractable, usages), {
+                name: 'NotSupportedError',
+                message: 'SHA-3 is only supported for digest operations',
+              }));
+            }
+            return;
+          }
           variations.push(testImportSpki(vector, size, hash, extractable));
           variations.push(testImportPkcs8(vector, size, hash, extractable));
           variations.push(testImportJwk(vector, size, hash, extractable));
@@ -649,6 +660,35 @@ const testVectors = [
     });
   });
   await Promise.all(variations);
+})().then(common.mustCall());
+
+// Type-specific JWK usage validation precedes `key_ops` validation.
+(async function() {
+  const privateJwk = keyData[1024].jwk;
+
+  for (const { name, publicUsages, privateUsages } of testVectors) {
+    const algorithm = { name, hash: 'SHA-256' };
+    const invalidUsage = publicUsages[0];
+    const validUsage = privateUsages[0];
+
+    await assert.rejects(
+      subtle.importKey(
+        'jwk',
+        { ...privateJwk, key_ops: [invalidUsage, invalidUsage] },
+        algorithm,
+        true,
+        [invalidUsage]),
+      { name: 'SyntaxError', message: /Unsupported key usage/ });
+
+    await assert.rejects(
+      subtle.importKey(
+        'jwk',
+        { ...privateJwk, key_ops: [validUsage, validUsage] },
+        algorithm,
+        true,
+        [validUsage]),
+      { name: 'DataError', message: 'Duplicate key operation' });
+  }
 })().then(common.mustCall());
 
 {

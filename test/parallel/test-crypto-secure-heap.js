@@ -13,18 +13,25 @@ if (common.isASan) {
   common.skip('ASan does not play well with secure heap allocations');
 }
 
-if (process.features.openssl_is_boringssl) {
+if (common.hasV8Sandbox) {
+  common.skip('--secure-heap is not available with the V8 sandbox');
+}
+
+const {
+  isBoringSSL,
+  hasFIPS,
+} = require('../common/crypto');
+
+if (isBoringSSL) {
   common.skip('BoringSSL does not support secure heap');
 }
 
 const assert = require('assert');
 const { fork } = require('child_process');
 const fixtures = require('../common/fixtures');
-const { hasOpenSSL, hasFIPS } = require('../common/crypto');
 const {
   secureHeapUsed,
   createDiffieHellman,
-  getFips,
 } = require('crypto');
 
 if (process.argv[2] === 'child') {
@@ -38,8 +45,7 @@ if (process.argv[2] === 'child') {
   assert.strictEqual(a.used, 0);
 
   {
-    const size = hasFIPS(3) ?
-      2048 : (getFips() === 1 || hasOpenSSL(3) ? 1024 : 256);
+    const size = hasFIPS(3) ? 2048 : 1024;
     const dh1 = createDiffieHellman(size);
     const p1 = dh1.getPrime('buffer');
     const dh2 = createDiffieHellman(p1, 'buffer');

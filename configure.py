@@ -59,7 +59,7 @@ maglev_enabled_architectures = ('x64', 'arm', 'arm64', 'ppc64', 's390x', 'riscv6
 
 # builtins may be removed later if they have been disabled by options
 shareable_builtins = {'undici/undici': 'deps/undici/undici.js',
-                     'amaro/dist/index': 'deps/amaro/dist/index.js'
+                     'amaro/dist/internal': 'deps/amaro/dist/internal.js'
 }
 
 # create option groups
@@ -208,14 +208,15 @@ parser.add_argument("--enable-pgo-generate",
     dest="enable_pgo_generate",
     default=None,
     help="Enable profiling with pgo of a binary. This feature is only available "
-         "on linux with gcc and g++ 5.4.1 or newer and on windows.")
+         "on linux with GCC or Clang, on macOS with Clang, and on windows.")
 
 parser.add_argument("--enable-pgo-use",
     action="store_true",
     dest="enable_pgo_use",
     default=None,
     help="Enable use of the profile generated with --enable-pgo-generate. This "
-         "feature is only available on linux with gcc and g++ 5.4.1 or newer and on windows.")
+         "feature is only available on linux with GCC or Clang, on macOS "
+         "with Clang, and on windows.")
 
 parser.add_argument("--enable-lto",
     action="store_true",
@@ -268,7 +269,8 @@ parser.add_argument('--openssl-is-fips',
     action='store_true',
     dest='openssl_is_fips',
     default=None,
-    help='specifies that the OpenSSL library is FIPS compatible')
+    help='specifies that the shared OpenSSL library is FIPS capable '
+         '(requires --shared-openssl)')
 
 parser.add_argument('--openssl-use-def-ca-store',
     action='store_true',
@@ -281,6 +283,27 @@ parser.add_argument('--openssl-system-ca-path',
     dest='openssl_system_ca_path',
     help='Use the specified path to system CA (PEM format) in addition to '
          'the OpenSSL supplied CA store or compiled-in Mozilla CA copy.')
+
+shared_optgroup.add_argument('--shared-abseil',
+    action='store_true',
+    dest='shared_abseil',
+    default=None,
+    help='link to a shared Abseil DLL instead of static linking')
+
+shared_optgroup.add_argument('--shared-abseil-includes',
+    action='store',
+    dest='shared_abseil_includes',
+    help='directory containing Abseil header files')
+
+shared_optgroup.add_argument('--shared-abseil-libname',
+    action='store',
+    dest='shared_abseil_libname',
+    help='alternative lib name to link to [default: %(default)s]')
+
+shared_optgroup.add_argument('--shared-abseil-libpath',
+    action='store',
+    dest='shared_abseil_libpath',
+    help='a directory to search for the shared Abseil DLL')
 
 shared_optgroup.add_argument('--shared-gtest',
     action='store_true',
@@ -296,7 +319,6 @@ shared_optgroup.add_argument('--shared-gtest-includes',
 shared_optgroup.add_argument('--shared-gtest-libname',
     action='store',
     dest='shared_gtest_libname',
-    default='gtest',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-gtest-libpath',
@@ -318,7 +340,6 @@ shared_optgroup.add_argument('--shared-hdr-histogram-includes',
 shared_optgroup.add_argument('--shared-hdr-histogram-libname',
     action='store',
     dest='shared_hdr_histogram_libname',
-    default='hdr_histogram',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-hdr-histogram-libpath',
@@ -326,11 +347,26 @@ shared_optgroup.add_argument('--shared-hdr-histogram-libpath',
     dest='shared_hdr_histogram_libpath',
     help='a directory to search for the shared HdrHistogram DLL')
 
-parser.add_argument('--experimental-http-parser',
+shared_optgroup.add_argument('--shared-highway',
     action='store_true',
-    dest='experimental_http_parser',
+    dest='shared_highway',
     default=None,
-    help='(no-op)')
+    help='link to a shared Highway (hwy) DLL instead of static linking')
+
+shared_optgroup.add_argument('--shared-highway-includes',
+    action='store',
+    dest='shared_highway_includes',
+    help='directory containing Highway header files')
+
+shared_optgroup.add_argument('--shared-highway-libname',
+    action='store',
+    dest='shared_highway_libname',
+    help='alternative lib name to link to [default: %(default)s]')
+
+shared_optgroup.add_argument('--shared-highway-libpath',
+    action='store',
+    dest='shared_highway_libpath',
+    help='a directory to search for the shared Highway DLL')
 
 shared_optgroup.add_argument('--shared-http-parser',
     action='store_true',
@@ -346,7 +382,6 @@ shared_optgroup.add_argument('--shared-http-parser-includes',
 shared_optgroup.add_argument('--shared-http-parser-libname',
     action='store',
     dest='shared_http_parser_libname',
-    default='llhttp',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-http-parser-libpath',
@@ -368,7 +403,6 @@ shared_optgroup.add_argument('--shared-libuv-includes',
 shared_optgroup.add_argument('--shared-libuv-libname',
     action='store',
     dest='shared_libuv_libname',
-    default='uv',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-libuv-libpath',
@@ -390,7 +424,6 @@ shared_optgroup.add_argument('--shared-lief-includes',
 shared_optgroup.add_argument('--shared-lief-libname',
     action='store',
     dest='shared_lief_libname',
-    default='LIEF',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-lief-libpath',
@@ -412,7 +445,6 @@ shared_optgroup.add_argument('--shared-nbytes-includes',
 shared_optgroup.add_argument('--shared-nbytes-libname',
     action='store',
     dest='shared_nbytes_libname',
-    default='nbytes',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-nbytes-libpath',
@@ -434,7 +466,6 @@ shared_optgroup.add_argument('--shared-nghttp2-includes',
 shared_optgroup.add_argument('--shared-nghttp2-libname',
     action='store',
     dest='shared_nghttp2_libname',
-    default='nghttp2',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-nghttp2-libpath',
@@ -456,7 +487,6 @@ shared_optgroup.add_argument('--shared-nghttp3-includes',
 shared_optgroup.add_argument('--shared-nghttp3-libname',
     action='store',
     dest='shared_nghttp3_libname',
-    default='nghttp3',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-nghttp3-libpath',
@@ -478,7 +508,6 @@ shared_optgroup.add_argument('--shared-ngtcp2-includes',
 shared_optgroup.add_argument('--shared-ngtcp2-libname',
     action='store',
     dest='shared_ngtcp2_libname',
-    default='ngtcp2',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-ngtcp2-libpath',
@@ -500,13 +529,34 @@ shared_optgroup.add_argument('--shared-openssl-includes',
 shared_optgroup.add_argument('--shared-openssl-libname',
     action='store',
     dest='shared_openssl_libname',
-    default='crypto,ssl',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-openssl-libpath',
     action='store',
     dest='shared_openssl_libpath',
     help='a directory to search for the shared OpenSSL DLLs')
+
+shared_optgroup.add_argument('--shared-perfetto',
+    action='store_true',
+    dest='shared_perfetto',
+    default=None,
+    help='link to a shared perfetto SDK instead of the one in deps/perfetto '
+         '(requires --with-perfetto)')
+
+shared_optgroup.add_argument('--shared-perfetto-includes',
+    action='store',
+    dest='shared_perfetto_includes',
+    help='directory containing perfetto header files')
+
+shared_optgroup.add_argument('--shared-perfetto-libname',
+    action='store',
+    dest='shared_perfetto_libname',
+    help='alternative lib name to link to [default: %(default)s]')
+
+shared_optgroup.add_argument('--shared-perfetto-libpath',
+    action='store',
+    dest='shared_perfetto_libpath',
+    help='a directory to search for the shared perfetto DLL')
 
 shared_optgroup.add_argument('--shared-uvwasi',
     action='store_true',
@@ -522,7 +572,6 @@ shared_optgroup.add_argument('--shared-uvwasi-includes',
 shared_optgroup.add_argument('--shared-uvwasi-libname',
     action='store',
     dest='shared_uvwasi_libname',
-    default='uvwasi',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-uvwasi-libpath',
@@ -544,7 +593,6 @@ shared_optgroup.add_argument('--shared-zlib-includes',
 shared_optgroup.add_argument('--shared-zlib-libname',
     action='store',
     dest='shared_zlib_libname',
-    default='z',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-zlib-libpath',
@@ -566,7 +614,6 @@ shared_optgroup.add_argument('--shared-simdjson-includes',
 shared_optgroup.add_argument('--shared-simdjson-libname',
     action='store',
     dest='shared_simdjson_libname',
-    default='simdjson',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-simdjson-libpath',
@@ -589,7 +636,6 @@ shared_optgroup.add_argument('--shared-simdutf-includes',
 shared_optgroup.add_argument('--shared-simdutf-libname',
     action='store',
     dest='shared_simdutf_libname',
-    default='simdutf',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-simdutf-libpath',
@@ -611,7 +657,6 @@ shared_optgroup.add_argument('--shared-ada-includes',
 shared_optgroup.add_argument('--shared-ada-libname',
     action='store',
     dest='shared_ada_libname',
-    default='ada',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-ada-libpath',
@@ -633,7 +678,6 @@ shared_optgroup.add_argument('--shared-merve-includes',
 shared_optgroup.add_argument('--shared-merve-libname',
     action='store',
     dest='shared_merve_libname',
-    default='merve',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-merve-libpath',
@@ -655,7 +699,6 @@ shared_optgroup.add_argument('--shared-brotli-includes',
 shared_optgroup.add_argument('--shared-brotli-libname',
     action='store',
     dest='shared_brotli_libname',
-    default='brotlidec,brotlienc',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-brotli-libpath',
@@ -677,7 +720,6 @@ shared_optgroup.add_argument('--shared-cares-includes',
 shared_optgroup.add_argument('--shared-cares-libname',
     action='store',
     dest='shared_cares_libname',
-    default='cares',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-cares-libpath',
@@ -699,7 +741,6 @@ shared_optgroup.add_argument('--shared-sqlite-includes',
 shared_optgroup.add_argument('--shared-sqlite-libname',
     action='store',
     dest='shared_sqlite_libname',
-    default='sqlite3',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-sqlite-libpath',
@@ -721,7 +762,6 @@ shared_optgroup.add_argument('--shared-ffi-includes',
 shared_optgroup.add_argument('--shared-ffi-libname',
     action='store',
     dest='shared_ffi_libname',
-    default='ffi',
     help='alternative libffi name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-ffi-libpath',
@@ -743,7 +783,6 @@ shared_optgroup.add_argument('--shared-temporal_capi-includes',
 shared_optgroup.add_argument('--shared-temporal_capi-libname',
     action='store',
     dest='shared_temporal_capi_libname',
-    default='temporal_capi',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-temporal_capi-libpath',
@@ -765,7 +804,6 @@ shared_optgroup.add_argument('--shared-zstd-includes',
 shared_optgroup.add_argument('--shared-zstd-libname',
     action='store',
     dest='shared_zstd_libname',
-    default='zstd',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-zstd-libpath',
@@ -786,7 +824,7 @@ for builtin in shareable_builtins:
 static_optgroup.add_argument('--static-zoslib-gyp',
     action='store',
     dest='static_zoslib_gyp',
-    help='path to zoslib.gyp file for includes and to link to static zoslib library')
+    help='path to zoslib.gyp file for includes and to link to static zoslib libraries')
 
 parser.add_argument('--tag',
     action='store',
@@ -812,6 +850,13 @@ parser.add_argument('--enable-v8windbg',
     default=None,
     help=argparse.SUPPRESS)  # Undocumented.
 
+parser.add_argument('--enable-v8debughelper',
+    action='store_true',
+    dest='enable_v8debughelper',
+    default=None,
+    help='Build V8\'s debug helper as a shared library, loadable by a debugger '
+         'extension.')
+
 parser.add_argument('--enable-trace-maps',
     action='store_true',
     dest='trace_maps',
@@ -834,7 +879,7 @@ parser.add_argument('--experimental-pointer-compression-shared-cage',
     action='store_true',
     dest='pointer_compression_shared_cage',
     default=None,
-    help='[Experimental] Use V8 pointer compression with shared cage (requires --experimental-enable-pointer-compression)')
+    help='[Experimental] Use V8 pointer compression with a shared cage and enable the V8 sandbox (requires --experimental-enable-pointer-compression)')
 
 parser.add_argument('--v8-options',
     action='store',
@@ -884,13 +929,13 @@ parser.add_argument('--use-largepages',
     action='store_true',
     dest='node_use_large_pages',
     default=None,
-    help='This option has no effect. --use-largepages is now a runtime option.')
+    help='This option is no longer supported and a no-op.')
 
 parser.add_argument('--use-largepages-script-lld',
     action='store_true',
     dest='node_use_large_pages_script_lld',
     default=None,
-    help='This option has no effect. --use-largepages is now a runtime option.')
+    help='This option is no longer supported and a no-op.')
 
 parser.add_argument('--use-section-ordering-file',
     action='store',
@@ -1022,32 +1067,11 @@ parser.add_argument('--control-flow-guard',
     default=None,
     help='enable Control Flow Guard (CFG)')
 
-# Dummy option for backwards compatibility
-parser.add_argument('--without-report',
-    action='store_true',
-    dest='unused_without_report',
-    default=None,
-    help=argparse.SUPPRESS)
-
-parser.add_argument('--with-snapshot',
-    action='store_true',
-    dest='unused_with_snapshot',
-    default=None,
-    help=argparse.SUPPRESS)
-
-parser.add_argument('--without-snapshot',
-    action='store_true',
-    dest='unused_without_snapshot',
-    default=None,
-    help=argparse.SUPPRESS)
-
 parser.add_argument('--without-siphash',
     action='store_true',
     dest='without_siphash',
     default=None,
     help=argparse.SUPPRESS)
-
-# End dummy list.
 
 parser.add_argument('--without-ssl',
     action='store_true',
@@ -1375,8 +1399,9 @@ def try_check_compiler(cc, lang):
 #
 # The version of asm compiler is needed for building openssl asm files.
 # See deps/openssl/openssl.gypi for detail.
-# Commands and regular expressions to obtain its version number are taken from
-# https://github.com/openssl/openssl/blob/OpenSSL_1_0_2-stable/crypto/sha/asm/sha512-x86_64.pl#L112-L129
+# Commands and regular expressions to obtain its version number mirror the
+# bundled OpenSSL assembler scripts, including
+# deps/openssl/openssl/crypto/sha/asm/sha512-x86_64.pl.
 #
 def get_version_helper(cc, regexp):
   try:
@@ -1572,6 +1597,55 @@ def get_rustc_version(rustc):
   warn(f'Could not recognize `rustc`: {rustc_ret}')
   return '0.0'
 
+# Prefixes of Rust target triple architectures for each GYP architecture.
+rust_arch_prefixes = {
+  'arm': ('arm', 'thumb'),
+  'arm64': ('aarch64',),
+  'ia32': ('i386', 'i586', 'i686'),
+  'loong64': ('loongarch64',),
+  'mips64el': ('mips64el',),
+  'mipsel': ('mipsel',),
+  'ppc64': ('powerpc64',),
+  'riscv64': ('riscv64',),
+  's390x': ('s390x',),
+  'x64': ('x86_64',),
+}
+
+def get_rust_cross_targets(host_arch, default_target):
+  """Returns (host triple, target triple, problem). problem is non-empty when
+  the triples for a bundled Temporal cross build cannot be determined."""
+  rust_target = os.environ.get('CARGO_BUILD_TARGET', '') or default_target
+  if not rust_target:
+    return '', '', 'Cross compilation with bundled Temporal requires CARGO_BUILD_TARGET.'
+
+  rust_host_target = ''
+  rustc = os.environ.get('RUSTC', 'rustc')
+  try:
+    version = subprocess.check_output(shlex.split(rustc) + ['-vV'],
+                                      stderr=subprocess.PIPE, text=True)
+  except (OSError, subprocess.CalledProcessError):
+    version = ''
+  match = re.search(r'^host: (\S+)$', version, re.MULTILINE)
+  if match:
+    rust_host_target = match.group(1)
+  if not rust_host_target:
+    return '', '', 'Cannot determine the Rust host triple from `rustc -vV`.'
+
+  # The host toolset follows CC_host, which may build 32-bit host tools for
+  # 32-bit targets (e.g. CC_host="gcc -m32") on a 64-bit Rust host.
+  rust_host_arch, _, rust_host_rest = rust_host_target.partition('-')
+  if not rust_host_arch.startswith(rust_arch_prefixes.get(host_arch, ('',))):
+    if host_arch == 'ia32' and rust_host_arch == 'x86_64':
+      rust_host_target = f'i686-{rust_host_rest}'
+    else:
+      return '', '', (f'Rust host triple {rust_host_target} does not match '
+                      f'the host toolset architecture {host_arch} (CC_host).')
+
+  for triple in (rust_host_target, rust_target):
+    if not re.fullmatch(r'[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+', triple):
+      error('Rust targets must be target triples, not paths to target JSON files')
+  return rust_host_target, rust_target, ''
+
 # Note: Apple clang self-reports as clang 4.2.0 and gcc 4.2.1.  It passes
 # the version check more by accident than anything else but a more rigorous
 # check involves checking the build number against an allowlist.  I'm not
@@ -1622,8 +1696,8 @@ def check_compiler(o):
   # cargo and rustc are needed for Temporal.
   if not options.v8_disable_temporal_support and not options.shared_temporal_capi:
     # Minimum cargo and rustc versions should match values in BUILDING.md.
-    min_cargo_ver_tuple = (1, 82)
-    min_rustc_ver_tuple = (1, 82)
+    min_cargo_ver_tuple = (1, 86)
+    min_rustc_ver_tuple = (1, 88)
     cargo = os.environ.get('CARGO', 'cargo')
     cargo_ver = get_cargo_version(cargo)
     print_verbose(f'Detected cargo (CARGO={cargo}): {cargo_ver}')
@@ -1817,12 +1891,13 @@ def configure_mips(o, target_arch):
   o['variables']['v8_host_byteorder'] = host_byteorder
 
 def configure_zos(o):
-  o['variables']['node_static_zoslib'] = b(True)
-  if options.static_zoslib_gyp:
-    # Apply to all Node.js components for now
-    o['variables']['zoslib_include_dir'] = Path(options.static_zoslib_gyp).parent / 'include'
+  if os.environ.get('ZOSLIB_INCLUDES'):
+    o['variables']['zoslib_include_dir'] = os.environ.get('ZOSLIB_INCLUDES')
     o['include_dirs'] += [o['variables']['zoslib_include_dir']]
   else:
+    raise Exception('Environment variable ZOSLIB_INCLUDES=<path to zoslib/include dir> is required.')
+
+  if not options.static_zoslib_gyp:
     raise Exception('--static-zoslib-gyp=<path to zoslib.gyp file> is required.')
 
 def clang_version_ge(version_checked):
@@ -1906,10 +1981,25 @@ def configure_node(o):
                      else target_arch != host_arch)
   if cross_compiling:
     os.environ['GYP_CROSSCOMPILE'] = "1"
-  if options.unused_without_snapshot:
-    warn('building --without-snapshot is no longer possible')
 
   o['variables']['want_separate_host_toolset'] = int(cross_compiling)
+  o['variables']['cargo_cross_compiling'] = 0
+  if (flavor != 'win' and cross_compiling and
+      not options.v8_disable_temporal_support and not options.shared_temporal_capi):
+    # Only bundled Temporal cross builds need explicit per-toolset Rust targets.
+    rust_host_target, rust_target, problem = get_rust_cross_targets(
+        host_arch, o['variables']['cargo_rust_target'])
+    if problem:
+      # Like a missing Rust toolchain, this is only fatal when Temporal support
+      # was explicitly requested.
+      if options.v8_enable_temporal_support:
+        error(problem)
+      warn(f'{problem} Support for Temporal will be disabled.')
+      options.v8_disable_temporal_support = True
+    else:
+      o['variables']['cargo_cross_compiling'] = 1
+      o['variables']['cargo_rust_target_target'] = rust_target
+      o['variables']['cargo_rust_target_host'] = rust_host_target
 
   if target_arch == 'arm64':
     o['variables']['arm_fpu'] = options.arm_fpu or 'neon'
@@ -1959,18 +2049,9 @@ def configure_node(o):
   else:
     o['variables']['node_enable_v8_vtunejit'] = 'false'
 
-  if (flavor != 'linux' and flavor != 'win') and (options.enable_pgo_generate or options.enable_pgo_use):
+  if flavor not in ('linux', 'mac', 'win') and (options.enable_pgo_generate or options.enable_pgo_use):
     raise Exception(
-      'The pgo option is supported only on linux and windows.')
-
-  if flavor == 'linux':
-    if options.enable_pgo_generate or options.enable_pgo_use:
-      version_checked = (5, 4, 1)
-      if not gcc_version_ge(version_checked):
-        version_checked_str = ".".join(map(str, version_checked))
-        raise Exception(
-          'The options --enable-pgo-generate and --enable-pgo-use '
-          f'are supported for gcc and gxx {version_checked_str} or newer only.')
+      'The pgo option is supported only on linux, macOS, and windows.')
 
   if options.enable_pgo_generate and options.enable_pgo_use:
     raise Exception(
@@ -1978,6 +2059,24 @@ def configure_node(o):
       'can be specified at a time. You would like to use '
       '--enable-pgo-generate first, profile node, and then recompile '
       'with --enable-pgo-use')
+
+  if flavor in ('linux', 'mac'):
+    if options.enable_pgo_generate or options.enable_pgo_use:
+      clang_compilers = [try_check_compiler(compiler, language)[1]
+                         for compiler, language in ((CC, 'c'), (CXX, 'c++'))]
+      if all(clang_compilers):
+        profile = os.path.abspath('node.profdata')
+        if options.enable_pgo_use and not os.path.isfile(profile):
+          raise Exception(
+            f'PGO profile not found: {profile}. Run llvm-profdata merge first.')
+        o['variables']['pgo_profile'] = profile
+      elif flavor == 'mac' or any(clang_compilers):
+        raise Exception('PGO requires both CC and CXX to use Clang on macOS '
+                        'or the same compiler family on linux.')
+      elif not gcc_version_ge((5, 4, 1)):
+        raise Exception(
+          'The options --enable-pgo-generate and --enable-pgo-use '
+          'require gcc and gxx 5.4.1 or newer.')
 
   o['variables']['enable_pgo_generate'] = b(options.enable_pgo_generate)
   o['variables']['enable_pgo_use']      = b(options.enable_pgo_use)
@@ -2047,10 +2146,8 @@ def configure_node(o):
 
   if options.node_use_large_pages or options.node_use_large_pages_script_lld:
     warn('''The `--use-largepages` and `--use-largepages-script-lld` options
-         have no effect during build time. Support for mapping to large pages is
-         now a runtime option of Node.js. Run `node --use-largepages` or add
-         `--use-largepages` to the `NODE_OPTIONS` environment variable once
-         Node.js is built to enable mapping to large pages.''')
+         have no effect. Mapping the Node.js static code to large pages is
+         no longer supported.''')
 
   if options.no_ifaddrs:
     o['defines'] += ['SUNOS_NO_IFADDRS']
@@ -2141,18 +2238,26 @@ def configure_napi(output):
   version = getnapibuildversion.get_napi_version()
   output['variables']['napi_build_version'] = version
 
-def configure_library(lib, output, pkgname=None):
+def configure_library(lib, output, pkgname=None, libraries_key='libraries', with_separate_include_var=False):
   shared_lib = 'shared_' + lib
   output['variables']['node_' + shared_lib] = b(getattr(options, shared_lib))
+
+  libraries = output[libraries_key] if libraries_key in output else output['variables'][libraries_key]
+
+  include_dirs = []
+  if with_separate_include_var:
+    output['variables'][f'node_{shared_lib}_include_dirs'] = include_dirs
 
   if getattr(options, shared_lib):
     (pkg_libs, pkg_cflags, pkg_libpath, _) = pkg_config(pkgname or lib)
 
     if options.__dict__[shared_lib + '_includes']:
-      output['include_dirs'] += [options.__dict__[shared_lib + '_includes']]
+      include_dirs += [options.__dict__[shared_lib + '_includes']]
     elif pkg_cflags:
       stripped_flags = [flag.strip() for flag in pkg_cflags.split('-I')]
-      output['include_dirs'] += [flag for flag in stripped_flags if flag]
+      include_dirs += [flag for flag in stripped_flags if flag]
+
+    output['include_dirs'] += include_dirs
 
     # libpath needs to be provided ahead libraries
     if options.__dict__[shared_lib + '_libpath']:
@@ -2162,17 +2267,20 @@ def configure_library(lib, output, pkgname=None):
         output['msvs_settings']['VCLinkerTool']['AdditionalOptions'] += [
           f"/LIBPATH:{options.__dict__[shared_lib + '_libpath']}"]
       else:
-        output['libraries'] += [
+        libraries += [
             f"-L{options.__dict__[shared_lib + '_libpath']}"]
     elif pkg_libpath:
-      output['libraries'] += [pkg_libpath]
+      libraries += [pkg_libpath]
 
-    default_libs = getattr(options, shared_lib + '_libname')
+    user_provided_value = getattr(options, shared_lib + '_libname')
 
-    if default_libs:
-      output['libraries'] += [f'-l{l}' for l in default_libs.split(',')]
+    if user_provided_value is not None:
+      libraries += [f'-l{l}' for l in user_provided_value.split(',')]
     elif pkg_libs:
-      output['libraries'] += pkg_libs.split()
+      libraries += pkg_libs.split()
+    elif pkg_libs is None:
+      pkg = (pkgname or lib)
+      libraries += [f'-l{l}' for l in pkg] if isinstance(pkg, list) else f'-l${pkg}'
 
 
 def configure_v8(o, configs):
@@ -2201,32 +2309,14 @@ def configure_v8(o, configs):
                                          flavor not in ('aix', 'os400', 'zos') and
                                          o['variables']['target_arch'] in maglev_enabled_architectures)
   o['variables']['v8_enable_pointer_compression'] = 1 if options.enable_pointer_compression else 0
-  # Using the sandbox requires always allocating array buffer backing stores in the sandbox.
-  # We currently have many backing stores tied to pointers from C++ land that are not
-  # even necessarily dynamic (e.g. in static storage) for fast communication between JS and C++.
-  # Until we manage to get rid of all those, v8_enable_sandbox cannot be used.
-  # Note that enabling pointer compression without enabling sandbox is unsupported by V8,
-  # so this can be broken at any time.
-  o['variables']['v8_enable_sandbox'] = 0
-  # We set v8_enable_pointer_compression_shared_cage to 0 always, even when
-  # pointer compression is enabled so that we don't accidentally enable shared
-  # cage mode when pointer compression is on.
+  # Like V8's own default, the sandbox goes with the shared pointer compression
+  # cage. Multi-cage builds give every IsolateGroup its own sandbox, which the
+  # array buffer allocator does not know about yet.
+  o['variables']['v8_enable_sandbox'] = 1 if options.pointer_compression_shared_cage else 0
   o['variables']['v8_enable_pointer_compression_shared_cage'] = 1 if options.pointer_compression_shared_cage else 0
   o['variables']['v8_enable_external_code_space'] = 1 if options.enable_pointer_compression else 0
   o['variables']['v8_enable_31bit_smis_on_64bit_arch'] = 1 if options.enable_pointer_compression else 0
   o['variables']['v8_enable_extensible_ro_snapshot'] = 0
-  # TODO(richardlau): Temporal objects in V8 currently reference a private
-  # ICU header file and fail to compile with shared ICU or no ICU. For now,
-  # if auto-detecting, warn and disable Temporal in those cases.
-  # Refs: https://github.com/nodejs/node/issues/62676
-  if (not options.v8_disable_temporal_support and not options.v8_enable_temporal_support):
-    match options.with_intl:
-      case 'none':
-        warn('Temporal support disabled when compiling without ICU')
-        options.v8_disable_temporal_support = True
-      case 'system-icu':
-        warn('Temporal support disabled when compiling with a shared ICU library')
-        options.v8_disable_temporal_support = True
   o['variables']['v8_enable_temporal_support'] = 0 if options.v8_disable_temporal_support else 1
   o['variables']['v8_trace_maps'] = 1 if options.trace_maps else 0
   o['variables']['v8_use_perfetto'] = 1 if options.with_perfetto else 0
@@ -2235,6 +2325,7 @@ def configure_v8(o, configs):
   o['variables']['force_dynamic_crt'] = 1 if options.shared else 0
   o['variables']['node_enable_d8'] = b(options.enable_d8)
   o['variables']['node_enable_v8windbg'] = b(options.enable_v8windbg)
+  o['variables']['node_enable_v8debughelper'] = b(options.enable_v8debughelper)
   if options.enable_d8:
     o['variables']['test_isolation_mode'] = 'noop'  # Needed by d8.gyp.
   if options.without_bundled_v8:
@@ -2242,6 +2333,8 @@ def configure_v8(o, configs):
       raise Exception('--enable-d8 is incompatible with --without-bundled-v8.')
     if options.enable_v8windbg:
       raise Exception('--enable-v8windbg is incompatible with --without-bundled-v8.')
+    if options.enable_v8debughelper:
+      raise Exception('--enable-v8debughelper is incompatible with --without-bundled-v8.')
     (pkg_libs, pkg_cflags, pkg_libpath, _) = pkg_config("v8")
     if pkg_libs and pkg_libpath:
       output['libraries'] += [pkg_libpath] + pkg_libs.split()
@@ -2275,7 +2368,6 @@ def configure_openssl(o):
   variables['node_shared_ngtcp2'] = b(options.shared_ngtcp2)
   variables['node_shared_nghttp3'] = b(options.shared_nghttp3)
   variables['openssl_is_fips'] = b(options.openssl_is_fips)
-  variables['node_fipsinstall'] = b(False)
 
   if options.openssl_no_asm:
     variables['openssl_no_asm'] = 1
@@ -2309,15 +2401,15 @@ def configure_openssl(o):
   if not options.shared_openssl and not options.openssl_no_asm:
     is_x86 = 'x64' in variables['target_arch'] or 'ia32' in variables['target_arch']
 
-    # supported asm compiler for AVX2. See https://github.com/openssl/openssl/
-    # blob/OpenSSL_1_1_0-stable/crypto/modes/asm/aesni-gcm-x86_64.pl#L52-L69
-    openssl110_asm_supported = \
+    # Check for an assembler that supports the instructions used by OpenSSL.
+    # See deps/openssl/openssl/INSTALL.md for its toolchain requirements.
+    openssl_asm_supported = \
       ('gas_version' in variables and Version(variables['gas_version']) >= Version('2.23')) or \
       ('xcode_version' in variables and Version(variables['xcode_version']) >= Version('5.0')) or \
       ('llvm_version' in variables and Version(variables['llvm_version']) >= Version('3.3')) or \
       ('nasm_version' in variables and Version(variables['nasm_version']) >= Version('2.10'))
 
-    if is_x86 and not openssl110_asm_supported:
+    if is_x86 and not openssl_asm_supported:
       error('''Did not find a new enough assembler, install one or build with
        --openssl-no-asm.
        Please refer to BUILDING.md''')
@@ -2330,16 +2422,24 @@ def configure_openssl(o):
   if options.openssl_no_asm and options.shared_openssl:
     error('--openssl-no-asm is incompatible with --shared-openssl')
 
+  if options.openssl_is_fips and not options.shared_openssl:
+    error('--openssl-is-fips is only available with --shared-openssl')
+
   if options.openssl_is_fips:
     o['defines'] += ['OPENSSL_FIPS']
 
-  if options.openssl_is_fips and not options.shared_openssl:
-    variables['node_fipsinstall'] = b(True)
-
-  configure_library('openssl', o)
+  configure_library('openssl', o, with_separate_include_var=True)
 
   o['variables']['openssl_version'] = get_openssl_version(o)
   o['variables']['openssl_is_boringssl'] = get_openssl_is_boringssl(o)
+
+  # BoringSSL identifies itself as OpenSSL 1.1.1 and is exempt from this check.
+  # A version of 0 means detection failed, which is already warned about in
+  # get_openssl_version() and is caught at compile time by ncrypto.h.
+  openssl_version = o['variables']['openssl_version']
+  if o['variables']['openssl_is_boringssl'] == 'false' and \
+     0 < openssl_version < 0x30000000:
+    error('OpenSSL 1.x is no longer supported, v3.0.0 or later is required.')
 
 def configure_lief(o):
   if options.without_lief:
@@ -2348,6 +2448,15 @@ def configure_lief(o):
     return
 
   configure_library('lief', o, pkgname='LIEF')
+
+def configure_perfetto(o):
+  if not options.with_perfetto:
+    if options.shared_perfetto:
+      error('--shared-perfetto requires --with-perfetto')
+    o['variables']['node_shared_perfetto'] = b(False)
+    return
+
+  configure_library('perfetto', o)
 
 def configure_sqlite(o):
   o['variables']['node_use_sqlite'] = b(not options.without_sqlite)
@@ -2358,7 +2467,7 @@ def configure_sqlite(o):
       without_sqlite_error('--shared-sqlite')
     return
 
-  configure_library('sqlite', o, pkgname='sqlite3')
+  configure_library('sqlite', o, pkgname='sqlite3', with_separate_include_var=True)
 
 def bundled_ffi_supported(os_name, target_arch):
   if target_arch == 'x86':
@@ -2401,12 +2510,25 @@ def configure_ffi(o):
   configure_library('ffi', o, pkgname='libffi')
 
 def configure_quic(o):
-  o['variables']['node_use_quic'] = b(options.experimental_quic and
-                                      not options.without_ssl)
+  if options.experimental_quic and options.without_ssl:
+    error('--experimental-quic is incompatible with --without-ssl')
+  o['variables']['node_use_quic'] = b(options.experimental_quic)
+
+  if not options.experimental_quic:
+    for lib in ['nghttp3', 'ngtcp2']:
+      shared_lib = 'shared_' + lib
+      if getattr(options, shared_lib):
+        error(f'--shared-{lib} requires --experimental-quic')
+    return
+
+  configure_library('nghttp3', output, pkgname='libnghttp3')
+  configure_library('ngtcp2', output, pkgname='libngtcp2')
 
 def configure_dtls(o):
-  o['variables']['node_use_dtls'] = b(options.experimental_dtls and
-                                      not options.without_ssl)
+  if options.experimental_dtls and options.without_ssl:
+    error('--experimental-dtls is incompatible with --without-ssl')
+
+  o['variables']['node_use_dtls'] = b(options.experimental_dtls)
 
 def configure_static(o):
   if options.fully_static or options.partly_static:
@@ -2416,7 +2538,12 @@ def configure_static(o):
       return
 
     if options.fully_static:
-      o['libraries'] += ['-static']
+      if flavor == 'linux':
+        # `-static` drops the `-pie` from common.gypi, e.g. clang:
+        # https://github.com/llvm/llvm-project/blob/68b03cf380e61c86aa59f94a10e8ce2d4c10cbb0/clang/lib/Driver/ToolChains/Gnu.cpp#L351-L366
+        o['libraries'] += ['-static-pie']
+      else:
+        o['libraries'] += ['-static']
     elif options.partly_static:
       o['libraries'] += ['-static-libgcc', '-static-libstdc++']
       if options.enable_asan:
@@ -2447,7 +2574,7 @@ def glob_to_var(dir_base, dir_sub, patch_dir):
             info(f'Using floating patch "{patchfile}" from "{dir_base}"')
         file_list.append(srcfile)
     break
-  return file_list
+  return sorted(file_list)
 
 def configure_intl(o):
   def icu_download(path):
@@ -2495,6 +2622,8 @@ def configure_intl(o):
   # always set icu_small, node.gyp depends on it being defined.
   o['variables']['icu_small'] = b(False)
   o['variables']['icu_system'] = b(False)
+  # always set this
+  o['variables']['v8_enable_temporal_systemicu'] = 1
 
   # prevent data override
   o['defines'] += ['ICU_NO_USER_DATA_OVERRIDE']
@@ -2737,8 +2866,8 @@ def configure_intl(o):
     icu_config['variables']['icu_asm_ext'] = 'S'
     icu_config['variables']['icu_asm_opts'] = [ '-a', 'xlc' ]
   elif sys.platform == 'zos':
-    icu_config['variables']['icu_asm_ext'] = 'S'
-    icu_config['variables']['icu_asm_opts'] = [ '-a', 'zos' ]
+    icu_config['variables']['icu_asm_ext'] = 'c'
+    icu_config['variables']['icu_asm_opts'] = []
   else:
     # assume GCC-compatible asm is OK
     icu_config['variables']['icu_asm_ext'] = 'S'
@@ -2842,22 +2971,90 @@ configure_node(output)
 configure_node_lib_files(output)
 configure_node_cctest_sources(output)
 configure_napi(output)
-configure_library('zlib', output)
+configure_library('zlib', output, with_separate_include_var=True)
 configure_library('http_parser', output, pkgname='libllhttp')
-configure_library('libuv', output)
+configure_library('libuv', output, with_separate_include_var=True)
+configure_library('abseil', output, pkgname=[
+  'absl_absl_check',
+  'absl_absl_log',
+  'absl_absl_vlog_is_on',
+  'absl_algorithm_container',
+  'absl_algorithm',
+  'absl_any_invocable',
+  'absl_base',
+  'absl_bind_front',
+  'absl_bits',
+  'absl_btree',
+  'absl_charset',
+  'absl_cleanup',
+  'absl_config',
+  'absl_cord',
+  'absl_crc32c',
+  'absl_core_headers',
+  'absl_die_if_null',
+  'absl_dynamic_annotations',
+  'absl_failure_signal_handler',
+  'absl_fast_type_id',
+  'absl_fixed_array',
+  'absl_flat_hash_map',
+  'absl_flat_hash_set',
+  'absl_function_ref',
+  'absl_has_ostream_operator',
+  'absl_hash_container_defaults',
+  'absl_hash',
+  'absl_inlined_vector',
+  'absl_int128',
+  'absl_layout',
+  'absl_leak_check',
+  'absl_linked_hash_map',
+  'absl_linked_hash_set',
+  'absl_log_entry',
+  'absl_log_globals',
+  'absl_log_initialize',
+  'absl_log_severity',
+  'absl_log_sink_registry',
+  'absl_log_sink',
+  'absl_memory',
+  'absl_no_destructor',
+  'absl_node_hash_map',
+  'absl_node_hash_set',
+  'absl_nullability',
+  'absl_optional',
+  'absl_overload',
+  'absl_prefetch',
+  'absl_random_bit_gen_ref',
+  'absl_random_distributions',
+  'absl_random_random',
+  'absl_raw_logging_internal',
+  'absl_span',
+  'absl_stacktrace',
+  'absl_status',
+  'absl_statusor',
+  'absl_str_format',
+  'absl_string_view',
+  'absl_strings',
+  'absl_symbolize',
+  'absl_synchronization',
+  'absl_time',
+  'absl_type_traits',
+  'absl_utility',
+  'absl_variant',
+])
 configure_library('ada', output)
 configure_library('simdjson', output)
 configure_library('simdutf', output)
 configure_library('brotli', output, pkgname=['libbrotlidec', 'libbrotlienc'])
 configure_library('cares', output, pkgname='libcares')
-configure_library('gtest', output)
+# Only cctest uses gtest; keep it out of the node binary's link line.
+output['variables']['node_shared_gtest_libraries'] = []
+configure_library('gtest', output, ['gtest_main', 'gtest'], 'node_shared_gtest_libraries')
 configure_library('hdr_histogram', output)
+configure_library('highway', output, pkgname='libhwy')
 configure_library('merve', output)
 configure_library('nbytes', output)
 configure_library('nghttp2', output, pkgname='libnghttp2')
-configure_library('nghttp3', output, pkgname='libnghttp3')
-configure_library('ngtcp2', output, pkgname='libngtcp2')
 configure_lief(output);
+configure_perfetto(output);
 configure_sqlite(output);
 configure_ffi(output);
 configure_library('temporal_capi', output)
@@ -2874,7 +3071,7 @@ configure_section_file(output)
 
 # remove builtins that have been disabled
 if options.without_amaro:
-    del shareable_builtins['amaro/dist/index']
+    del shareable_builtins['amaro/dist/internal']
 
 # configure shareable builtins
 output['variables']['node_builtin_shareable_builtins'] = []

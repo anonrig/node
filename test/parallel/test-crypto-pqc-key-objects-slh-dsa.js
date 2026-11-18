@@ -4,7 +4,7 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-const { hasOpenSSL } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 
 const assert = require('assert');
 const {
@@ -101,19 +101,27 @@ for (const asymmetricKeyType of [
 
   if (!hasOpenSSL(3, 5)) {
     assert.throws(() => createPublicKey(keys.public), {
-      code: hasOpenSSL(3) ? 'ERR_OSSL_EVP_DECODE_ERROR' : 'ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM',
+      code: isBoringSSL ? 'ERR_OSSL_PEM_NO_START_LINE' : 'ERR_OSSL_UNSUPPORTED',
     });
 
     assert.throws(() => createPrivateKey(keys.private), {
-      code: hasOpenSSL(3) ? 'ERR_OSSL_UNSUPPORTED' : 'ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM',
+      code: isBoringSSL ? 'ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM' : 'ERR_OSSL_UNSUPPORTED',
     });
-  } else {
-    const publicKey = createPublicKey(keys.public);
+  }
+
+  const supported = hasOpenSSL(3, 5) ||
+    (isBoringSSL && (asymmetricKeyType === 'slh-dsa-sha2-128s' ||
+                    asymmetricKeyType === 'slh-dsa-shake-256f'));
+  if (supported) {
+    const publicKey = createPublicKey(isBoringSSL ?
+      { format: 'jwk', key: keys.jwk } : keys.public);
+    const privateKey = createPrivateKey(isBoringSSL ?
+      { format: 'jwk', key: keys.jwk } : keys.private);
     assertPublicKey(publicKey);
 
-    const pubFromPriv = createPublicKey(keys.private);
+    const pubFromPriv = createPublicKey(isBoringSSL ? privateKey : keys.private);
     assertPublicKey(pubFromPriv);
-    assertPrivateKey(createPrivateKey(keys.private));
+    assertPrivateKey(privateKey);
     assert.strictEqual(pubFromPriv.equals(publicKey), true);
 
     // JWK import error tests

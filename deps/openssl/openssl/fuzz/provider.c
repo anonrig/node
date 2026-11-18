@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2024 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2023-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,8 +32,11 @@
     {                                                                    \
         STACK_OF(evp) *obj_stack = stack;                                \
                                                                          \
-        if (sk_##evp##_push(obj_stack, obj) > 0)                         \
-            evp##_up_ref(obj);                                           \
+        if (!evp##_up_ref(obj))                                          \
+            return;                                                      \
+                                                                         \
+        if (sk_##evp##_push(obj_stack, obj) <= 0)                        \
+            evp##_free(obj);                                             \
     }                                                                    \
     static void init_##name(OSSL_LIB_CTX *libctx)                        \
     {                                                                    \
@@ -112,6 +115,10 @@ static int read_uint(const uint8_t **buf, size_t *len, uint64_t **res)
     }
 
     *res = OPENSSL_malloc(sizeof(uint64_t));
+    if (*res == NULL) {
+        r = 0;
+        goto end;
+    }
     **res = (uint64_t)**buf;
 
     *buf += sizeof(uint64_t);
@@ -130,6 +137,10 @@ static int read_int(const uint8_t **buf, size_t *len, int64_t **res)
     }
 
     *res = OPENSSL_malloc(sizeof(int64_t));
+    if (*res == NULL) {
+        r = 0;
+        goto end;
+    }
     **res = (int64_t)**buf;
 
     *buf += sizeof(int64_t);
@@ -148,6 +159,10 @@ static int read_double(const uint8_t **buf, size_t *len, double **res)
     }
 
     *res = OPENSSL_malloc(sizeof(double));
+    if (*res == NULL) {
+        r = 0;
+        goto end;
+    }
     **res = (double)**buf;
 
     *buf += sizeof(double);
@@ -214,7 +229,7 @@ static int read_octet_string(const uint8_t **buf, size_t *len, char **res)
 
     *res = (char *)*buf;
 
-    r = ptr - *buf;
+    r = (int)(ptr - *buf);
     *len -= r;
     *buf = ptr;
 
@@ -269,7 +284,9 @@ static OSSL_PARAM *fuzz_params(OSSL_PARAM *param, const uint8_t **buf, size_t *l
     for (p = param; p != NULL && p->key != NULL; p++)
         p_num++;
 
-    fuzzed_parameters = OPENSSL_zalloc(sizeof(OSSL_PARAM) * (p_num + 1));
+    fuzzed_parameters = OPENSSL_calloc(p_num + 1, sizeof(OSSL_PARAM));
+    if (fuzzed_parameters == NULL)
+        return NULL;
     p = fuzzed_parameters;
 
     for (; param != NULL && param->key != NULL; param++) {
@@ -286,6 +303,11 @@ static OSSL_PARAM *fuzz_params(OSSL_PARAM *param, const uint8_t **buf, size_t *l
 
         if (!read_int(buf, len, &use_param)) {
             use_param = OPENSSL_malloc(sizeof(uint64_t));
+            if (use_param == NULL) {
+                free_params(fuzzed_parameters);
+                OPENSSL_free(fuzzed_parameters);
+                return NULL;
+            }
             *use_param = 0;
         }
 
@@ -293,18 +315,48 @@ static OSSL_PARAM *fuzz_params(OSSL_PARAM *param, const uint8_t **buf, size_t *l
         case OSSL_PARAM_INTEGER:
             if (strcmp(param->key, OSSL_KDF_PARAM_ITER) == 0) {
                 p_value_int = OPENSSL_malloc(sizeof(ITERS));
+                if (p_value_int == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_int = ITERS;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_N) == 0) {
                 p_value_int = OPENSSL_malloc(sizeof(ITERS));
+                if (p_value_int == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_int = ITERS;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_R) == 0) {
                 p_value_int = OPENSSL_malloc(sizeof(BLOCKSIZE));
+                if (p_value_int == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_int = BLOCKSIZE;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_P) == 0) {
                 p_value_int = OPENSSL_malloc(sizeof(BLOCKSIZE));
+                if (p_value_int == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_int = BLOCKSIZE;
             } else if (!*use_param || !read_int(buf, len, &p_value_int)) {
                 p_value_int = OPENSSL_malloc(sizeof(int64_t));
+                if (p_value_int == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_int = 0;
             }
 
@@ -315,18 +367,48 @@ static OSSL_PARAM *fuzz_params(OSSL_PARAM *param, const uint8_t **buf, size_t *l
         case OSSL_PARAM_UNSIGNED_INTEGER:
             if (strcmp(param->key, OSSL_KDF_PARAM_ITER) == 0) {
                 p_value_uint = OPENSSL_malloc(sizeof(UITERS));
+                if (p_value_uint == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_uint = UITERS;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_N) == 0) {
                 p_value_uint = OPENSSL_malloc(sizeof(UITERS));
+                if (p_value_uint == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_uint = UITERS;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_R) == 0) {
                 p_value_uint = OPENSSL_malloc(sizeof(UBLOCKSIZE));
+                if (p_value_uint == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_uint = UBLOCKSIZE;
             } else if (strcmp(param->key, OSSL_KDF_PARAM_SCRYPT_P) == 0) {
                 p_value_uint = OPENSSL_malloc(sizeof(UBLOCKSIZE));
+                if (p_value_uint == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_uint = UBLOCKSIZE;
             } else if (!*use_param || !read_uint(buf, len, &p_value_uint)) {
                 p_value_uint = OPENSSL_malloc(sizeof(uint64_t));
+                if (p_value_uint == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_uint = 0;
             }
 
@@ -337,6 +419,12 @@ static OSSL_PARAM *fuzz_params(OSSL_PARAM *param, const uint8_t **buf, size_t *l
         case OSSL_PARAM_REAL:
             if (!*use_param || !read_double(buf, len, &p_value_double)) {
                 p_value_double = OPENSSL_malloc(sizeof(double));
+                if (p_value_double == NULL) {
+                    free_params(fuzzed_parameters);
+                    OPENSSL_free(fuzzed_parameters);
+                    OPENSSL_free(use_param);
+                    return NULL;
+                }
                 *p_value_double = 0;
             }
 
@@ -390,41 +478,57 @@ static int do_evp_cipher(const EVP_CIPHER *evp_cipher, const OSSL_PARAM param[])
 {
     unsigned char outbuf[1024];
     int outlen, tmplen;
-    unsigned char key[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-    unsigned char iv[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    int key_len = EVP_CIPHER_get_key_length(evp_cipher);
+    int iv_len = EVP_CIPHER_get_iv_length(evp_cipher);
+    unsigned char *key = NULL, *iv = NULL;
     const char intext[] = "text";
-    EVP_CIPHER_CTX *ctx;
+    EVP_CIPHER_CTX *ctx = NULL;
+    int i;
+
+    if (key_len <= 0)
+        key_len = 16;
+    if (iv_len <= 0)
+        iv_len = 16;
+
+    key = OPENSSL_zalloc(key_len);
+    iv = OPENSSL_zalloc(iv_len);
+    if (key == NULL || iv == NULL)
+        goto err;
+    for (i = 0; i < key_len; i++)
+        key[i] = (unsigned char)i;
+    for (i = 0; i < iv_len; i++)
+        iv[i] = (unsigned char)(i + 1);
 
     ctx = EVP_CIPHER_CTX_new();
+    if (ctx == NULL)
+        goto err;
 
-    if (!EVP_CIPHER_CTX_set_params(ctx, param)) {
-        EVP_CIPHER_CTX_free(ctx);
-        return 0;
-    }
+    if (!EVP_EncryptInit_ex2(ctx, evp_cipher, key, iv, NULL))
+        goto err;
 
-    if (!EVP_EncryptInit_ex2(ctx, evp_cipher, key, iv, NULL)) {
-        /* Error */
-        EVP_CIPHER_CTX_free(ctx);
-        return 0;
-    }
+    if (!EVP_CIPHER_CTX_set_params(ctx, param))
+        goto err;
 
-    if (!EVP_EncryptUpdate(ctx, outbuf, &outlen, (const unsigned char *)intext, strlen(intext))) {
-        /* Error */
-        EVP_CIPHER_CTX_free(ctx);
-        return 0;
-    }
+    if (!EVP_EncryptUpdate(ctx, outbuf, &outlen, (const unsigned char *)intext,
+            (int)strlen(intext)))
+        goto err;
     /*
      * Buffer passed to EVP_EncryptFinal() must be after data just
      * encrypted to avoid overwriting it.
      */
-    if (!EVP_EncryptFinal_ex(ctx, outbuf + outlen, &tmplen)) {
-        /* Error */
-        EVP_CIPHER_CTX_free(ctx);
-        return 0;
-    }
+    if (!EVP_EncryptFinal_ex(ctx, outbuf + outlen, &tmplen))
+        goto err;
     outlen += tmplen;
     EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_free(key);
+    OPENSSL_free(iv);
     return 1;
+
+err:
+    EVP_CIPHER_CTX_free(ctx);
+    OPENSSL_free(key);
+    OPENSSL_free(iv);
+    return 0;
 }
 
 static int do_evp_kdf(EVP_KDF *evp_kdf, const OSSL_PARAM params[])
@@ -554,12 +658,12 @@ static int do_evp_md(EVP_MD *evp_md, const OSSL_PARAM params[])
         goto end;
     }
 
-    if (!EVP_MD_CTX_set_params(mdctx, params)) {
+    if (!EVP_DigestInit_ex2(mdctx, evp_md, NULL)) {
         r = 0;
         goto end;
     }
 
-    if (!EVP_DigestInit_ex2(mdctx, evp_md, NULL)) {
+    if (!EVP_MD_CTX_set_params(mdctx, params)) {
         r = 0;
         goto end;
     }

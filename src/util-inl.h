@@ -36,15 +36,32 @@
 #include <regex>  // NOLINT(build/c++11)
 #endif            // _WIN32
 
-#define CHAR_TEST(bits, name, expr)                                           \
-  template <typename T>                                                       \
-  bool name(const T ch) {                                                     \
-    static_assert(sizeof(ch) >= (bits) / 8,                                   \
-                  "Character must be wider than " #bits " bits");             \
-    return (expr);                                                            \
+#define CHAR_TEST(bits, name, expr)                                            \
+  template <typename T>                                                        \
+  constexpr bool name(const T ch) {                                            \
+    static_assert(sizeof(ch) >= (bits) / 8,                                    \
+                  "Character must be wider than " #bits " bits");              \
+    return (expr);                                                             \
   }
 
 namespace node {
+
+// If a UTF-16 character is a high/leading surrogate.
+CHAR_TEST(16, IsUnicodeLead, (ch & 0xFC00) == 0xD800)
+
+// If a UTF-16 character is a low/trailing surrogate.
+CHAR_TEST(16, IsUnicodeTrail, (ch & 0xFC00) == 0xDC00)
+
+// If a UTF-16 character is a surrogate.
+CHAR_TEST(16, IsUnicodeSurrogate, (ch & 0xF800) == 0xD800)
+
+// If a UTF-16 surrogate is a low/trailing one.
+CHAR_TEST(16, IsUnicodeSurrogateTrail, (ch & 0x400) != 0)
+
+// The code point encoded by a valid surrogate pair.
+constexpr uint32_t CombineSurrogates(uint32_t lead, uint32_t trail) {
+  return 0x10000 + ((lead - 0xD800) << 10) + (trail - 0xDC00);
+}
 
 template <typename T>
 ListNode<T>::ListNode() : prev_(this), next_(this) {}
@@ -394,14 +411,13 @@ v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
   if (isolate == nullptr) isolate = v8::Isolate::GetCurrent();
   v8::EscapableHandleScope handle_scope(isolate);
 
-  MaybeStackBuffer<v8::Local<v8::Value>, 128> arr(vec.size());
-  arr.SetLength(vec.size());
+  MaybeStackBuffer<v8::Value, 128> arr(isolate, vec.size());
   for (size_t i = 0; i < vec.size(); ++i) {
     if (!ToV8Value(context, vec[i], isolate).ToLocal(&arr[i]))
       return v8::MaybeLocal<v8::Value>();
   }
 
-  return handle_scope.Escape(v8::Array::New(isolate, arr.out(), arr.length()));
+  return handle_scope.Escape(arr.ToArray());
 }
 
 template <typename T>
@@ -430,8 +446,7 @@ v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
   if (isolate == nullptr) isolate = v8::Isolate::GetCurrent();
   v8::EscapableHandleScope handle_scope(isolate);
 
-  MaybeStackBuffer<v8::Local<v8::Value>, 128> arr(vec.size());
-  arr.SetLength(vec.size());
+  MaybeStackBuffer<v8::Value, 128> arr(isolate, vec.size());
   auto it = vec.begin();
   for (size_t i = 0; i < vec.size(); ++i) {
     if (!ToV8Value(context, *it, isolate).ToLocal(&arr[i]))
@@ -439,7 +454,7 @@ v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
     std::advance(it, 1);
   }
 
-  return handle_scope.Escape(v8::Array::New(isolate, arr.out(), arr.length()));
+  return handle_scope.Escape(arr.ToArray());
 }
 
 template <typename T, typename U>
@@ -519,7 +534,14 @@ v8::Local<v8::Array> ToV8ValuePrimitiveArray(v8::Local<v8::Context> context,
 }
 
 SlicedArguments::SlicedArguments(
-    const v8::FunctionCallbackInfo<v8::Value>& args, size_t start) {
+    const v8::FunctionCallbackInfo<v8::Value>& args, size_t start)
+    : SlicedArguments(args.GetIsolate(), args, start) {}
+
+SlicedArguments::SlicedArguments(
+    v8::Isolate* isolate,
+    const v8::FunctionCallbackInfo<v8::Value>& args,
+    size_t start)
+    : MaybeStackBuffer<v8::Value>(isolate) {
   const size_t length = static_cast<size_t>(args.Length());
   if (start >= length) return;
   const size_t size = length - start;
@@ -540,6 +562,27 @@ void MaybeStackBuffer<T, kStackStorageSize>::AllocateSufficientStorage(
     capacity_ = storage;
     if (!was_allocated && length_ > 0)
       memcpy(buf_, buf_st_, length_ * sizeof(buf_[0]));
+  }
+
+  length_ = storage;
+}
+
+template <V8Type T, size_t kStackStorageSize>
+void MaybeStackBuffer<T, kStackStorageSize>::AllocateSufficientStorage(
+    size_t storage) {
+  CHECK(!IsInvalidated());
+  if (storage > capacity()) {
+    if (!local_vector_.has_value()) {
+      local_vector_.emplace(isolate_, storage);
+      // Copy existing stack data into the LocalVector.
+      for (size_t i = 0; i < length_; i++) {
+        (*local_vector_)[i] = buf_st_[i];
+      }
+    } else {
+      local_vector_->resize(storage);
+    }
+    buf_ = local_vector_->data();
+    capacity_ = storage;
   }
 
   length_ = storage;
@@ -792,7 +835,7 @@ inline v8::MaybeLocal<v8::Object> NewDictionaryInstanceNullProto(
     if (value.IsEmpty()) return v8::MaybeLocal<v8::Object>();
   }
   v8::Local<v8::Object> obj = tmpl->NewInstance(context, property_values);
-  if (obj->SetPrototypeV2(context, v8::Null(v8::Isolate::GetCurrent()))
+  if (obj->SetPrototype(context, v8::Null(v8::Isolate::GetCurrent()))
           .IsNothing()) {
     return v8::MaybeLocal<v8::Object>();
   }

@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.mkdtempSync dispatches to VFS and returns a mount-rooted path, including
@@ -10,10 +10,9 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-mkdtempSync-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src', { recursive: true });
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 const prefix = path.join(mountPoint, 'src/tmp-');
 

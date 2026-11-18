@@ -75,21 +75,25 @@ class V8_NODISCARD PerThreadAssertScope
 
 // Per-isolate assert scopes.
 
-#define PER_ISOLATE_DCHECK_TYPE(V, enable)                              \
-  /* Scope to document where we do not expect javascript execution. */  \
-  /* Scope to introduce an exception to DisallowJavascriptExecution. */ \
-  V(AllowJavascriptExecution, DisallowJavascriptExecution,              \
-    javascript_execution_assert, enable)                                \
-  /* Scope to document where we do not expect deoptimization. */        \
-  /* Scope to introduce an exception to DisallowDeoptimization. */      \
-  V(AllowDeoptimization, DisallowDeoptimization, deoptimization_assert, \
-    enable)                                                             \
-  /* Scope to document where we do not expect deoptimization. */        \
-  /* Scope to introduce an exception to DisallowDeoptimization. */      \
-  V(AllowCompilation, DisallowCompilation, compilation_assert, enable)  \
-  /* Scope to document where we do not expect exceptions. */            \
-  /* Scope to introduce an exception to DisallowExceptions. */          \
-  V(AllowExceptions, DisallowExceptions, no_exception_assert, enable)
+#define PER_ISOLATE_DCHECK_TYPE(V, enable)                                \
+  /* Scope to document where we do not expect javascript execution. */    \
+  /* Scope to introduce an exception to DisallowJavascriptExecution. */   \
+  V(AllowJavascriptExecution, DisallowJavascriptExecution,                \
+    javascript_execution_assert, enable)                                  \
+  /* Scope to document where we do not expect deoptimization. */          \
+  /* Scope to introduce an exception to DisallowDeoptimization. */        \
+  V(AllowDeoptimization, DisallowDeoptimization, deoptimization_assert,   \
+    enable)                                                               \
+  /* Scope to document where we do not expect deoptimization. */          \
+  /* Scope to introduce an exception to DisallowDeoptimization. */        \
+  V(AllowCompilation, DisallowCompilation, compilation_assert, enable)    \
+  /* Scope to document where we do not expect exceptions. */              \
+  /* Scope to introduce an exception to DisallowExceptions. */            \
+  V(AllowExceptions, DisallowExceptions, no_exception_assert, enable)     \
+  /* Scope to document where we do not expect JS object modifications. */ \
+  /* Scope to introduce an exception to DisallowJSObjectModification. */  \
+  V(AllowJSObjectModification, DisallowJSObjectModification,              \
+    js_object_modification_assert, enable)
 
 #define PER_ISOLATE_CHECK_TYPE(V, enable)                                    \
   /* Scope in which javascript execution leads to exception being thrown. */ \
@@ -110,7 +114,7 @@ class V8_NODISCARD PerThreadAssertScope
     ScopeType& operator=(const ScopeType&) = delete;                 \
     V8_EXPORT_PRIVATE ~ScopeType();                                  \
                                                                      \
-    static bool IsAllowed(Isolate* isolate);                         \
+    V8_EXPORT_PRIVATE static bool IsAllowed(Isolate* isolate);       \
                                                                      \
     V8_EXPORT_PRIVATE static void Open(Isolate* isolate,             \
                                        bool* was_execution_allowed); \
@@ -236,6 +240,9 @@ using AllowCodeAllocation =
 
 // Scope to document where we do not expect garbage collections. It differs from
 // DisallowHeapAllocation by also forbidding safepoints.
+//
+// Note: Consider marking it as `V8_LIFETIME_BOUND` when using it as a function
+// parameter, when the result must not outlive the scope.
 using DisallowGarbageCollection =
     PerThreadAssertScopeDebugOnly<false, SAFEPOINTS_ASSERT,
                                   HEAP_ALLOCATION_ASSERT>;

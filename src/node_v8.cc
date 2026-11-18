@@ -166,20 +166,12 @@ void BindingData::Deserialize(Local<Context> context,
                               int index,
                               InternalFieldInfoBase* info) {
   DCHECK_IS_SNAPSHOT_SLOT(index);
-  HandleScope scope(Isolate::GetCurrent());
-  Realm* realm = Realm::GetCurrent(context);
-  // Recreate the buffer in the constructor.
-  InternalFieldInfo* casted_info = static_cast<InternalFieldInfo*>(info);
-  BindingData* binding =
-      realm->AddBindingData<BindingData>(holder, casted_info);
-  CHECK_NOT_NULL(binding);
+  Realm::DeserializeBindingData<BindingData>(
+      context, holder, static_cast<InternalFieldInfo*>(info));
 }
 
 InternalFieldInfoBase* BindingData::Serialize(int index) {
-  DCHECK_IS_SNAPSHOT_SLOT(index);
-  InternalFieldInfo* info = internal_field_info_;
-  internal_field_info_ = nullptr;
-  return info;
+  return TakeInternalFieldInfo(index, &internal_field_info_);
 }
 
 void BindingData::MemoryInfo(MemoryTracker* tracker) const {
@@ -211,6 +203,39 @@ void SetHeapSnapshotNearHeapLimit(const FunctionCallbackInfo<Value>& args) {
 
   env->AddHeapSnapshotNearHeapLimitCallback();
   env->set_heap_snapshot_near_heap_limit(limit);
+}
+
+void SetHeapProfileNearHeapLimit(const FunctionCallbackInfo<Value>& args) {
+  CHECK(args[0]->IsUint32());
+  Environment* env = Environment::GetCurrent(args);
+  uint32_t limit = args[0].As<v8::Uint32>()->Value();
+  CHECK_GT(limit, 0);
+
+  std::string dir = env->options()->diagnostic_dir;
+  if (dir.empty()) {
+    dir = Environment::GetCwd(env->exec_path());
+  }
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, dir);
+
+  env->AddHeapProfileNearHeapLimitCallback();
+  env->set_heap_profile_near_heap_limit(limit);
+}
+
+// Only used by tests, so that the pointer compression heap warning can be
+// exercised without allocating a large heap. Takes the "likely" and the
+// "certain" thresholds in bytes.
+void SetPointerCompressionHeapWarningThresholds(
+    const FunctionCallbackInfo<Value>& args) {
+  CHECK(args[0]->IsNumber());
+  CHECK(args[1]->IsNumber());
+  Environment* env = Environment::GetCurrent(args);
+  double likely = args[0].As<v8::Number>()->Value();
+  double certain = args[1].As<v8::Number>()->Value();
+  CHECK_GE(likely, 0);
+  CHECK_GE(certain, 0);
+  env->set_pointer_compression_heap_warning_thresholds(
+      static_cast<uint64_t>(likely), static_cast<uint64_t>(certain));
 }
 
 void UpdateHeapStatisticsBuffer(const FunctionCallbackInfo<Value>& args) {
@@ -309,6 +334,7 @@ void StopHeapProfile(const FunctionCallbackInfo<Value>& args) {
   std::ostringstream out_stream;
   bool success = node::SerializeHeapProfile(isolate, out_stream);
   if (success) {
+    isolate->GetHeapProfiler()->StopSamplingHeapProfiler();
     Local<Value> result;
     if (ToV8Value(env->context(), out_stream.str(), isolate).ToLocal(&result)) {
       args.GetReturnValue().Set(result);
@@ -730,6 +756,14 @@ void Initialize(Local<Object> target,
                         SetHeapSnapshotNearHeapLimit);
   SetMethod(context,
             target,
+            "setHeapProfileNearHeapLimit",
+            SetHeapProfileNearHeapLimit);
+  SetMethod(context,
+            target,
+            "setPointerCompressionHeapWarningThresholds",
+            SetPointerCompressionHeapWarningThresholds);
+  SetMethod(context,
+            target,
             "updateHeapStatisticsBuffer",
             UpdateHeapStatisticsBuffer);
 
@@ -745,17 +779,17 @@ void Initialize(Local<Object> target,
   // Heap space names are extracted once and exposed to JavaScript to
   // avoid excessive creation of heap space name Strings.
   HeapSpaceStatistics s;
-  MaybeStackBuffer<Local<Value>, 16> heap_spaces(number_of_heap_spaces);
+  MaybeStackBuffer<Value, 16> heap_spaces(env->isolate(),
+                                          number_of_heap_spaces);
   for (size_t i = 0; i < number_of_heap_spaces; i++) {
     env->isolate()->GetHeapSpaceStatistics(&s, i);
     heap_spaces[i] = String::NewFromUtf8(env->isolate(), s.space_name())
                                              .ToLocalChecked();
   }
   target
-      ->Set(
-          context,
-          FIXED_ONE_BYTE_STRING(env->isolate(), "kHeapSpaces"),
-          Array::New(env->isolate(), heap_spaces.out(), number_of_heap_spaces))
+      ->Set(context,
+            FIXED_ONE_BYTE_STRING(env->isolate(), "kHeapSpaces"),
+            heap_spaces.ToArray())
       .Check();
 
   SetMethod(context,
@@ -839,6 +873,8 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(SetFlagsFromString);
   registry->Register(GetHashSeed);
   registry->Register(SetHeapSnapshotNearHeapLimit);
+  registry->Register(SetHeapProfileNearHeapLimit);
+  registry->Register(SetPointerCompressionHeapWarningThresholds);
   registry->Register(GCProfiler::New);
   registry->Register(GCProfiler::Start);
   registry->Register(GCProfiler::Stop);

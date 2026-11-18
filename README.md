@@ -41,24 +41,36 @@ Looking for help? Check out the
 
 ## Release types
 
-* **Current**: Under active development. Code for the Current release is in the
-  branch for its major version number (for example,
-  [v22.x](https://github.com/nodejs/node/tree/v22.x)). Node.js releases a new
-  major version every 6 months, allowing for breaking changes. This happens in
-  April and October every year. Releases appearing each October have a support
-  life of 8 months. Releases appearing each April convert to LTS (see below)
-  each October.
-* **LTS**: Releases that receive Long Term Support, with a focus on stability
-  and security. Every even-numbered major version will become an LTS release.
-  LTS releases receive 12 months of _Active LTS_ support and a further 18 months
-  of _Maintenance_. LTS release lines have alphabetically-ordered code names,
-  beginning with v4 Argon. There are no breaking changes or feature additions,
-  except in some special circumstances.
-* **Nightly**: Code from the Current branch built every 24-hours when there are
-  changes. Use with caution.
+Node.js follows [semantic versioning](https://semver.org).
 
-Current and LTS releases follow [semantic versioning](https://semver.org). A
-member of the Release Team [signs](#release-keys) each Current and LTS release.
+* **Alpha**: Under active development where semver-major changes are allowed.
+  Each October, a new release line (for example, Node.js 27) branches off `main`
+  and receives Alpha releases (for example, `27.0.0-alpha.0.0.0`) for 6 months,
+  then are promoted to Current (see below) each April. Alpha releases are signed,
+  tagged, and tested through [CITGM](https://github.com/nodejs/citgm), but their
+  API and ABI may change between releases. They are intended for library authors
+  and CI pipelines, not for production use.
+* **Current**: Under active development, no semver-major changes allowed. Node.js
+  releases a new major version once a year, in April. Releases stay Current for
+  6 months, then convert to LTS (see below) each October. Their ABI may change
+  between releases. They are intended for library authors and CI pipelines, not
+  for production use.
+* **LTS**: Releases under Long Term Support, with a focus on stability
+  and security. Only changes that have been on Alpha or Current release for two
+  weeks can be backported to a typical LTS release. Every major version becomes an LTS
+  release, and receives 30 months of LTS support, for a total of 36 months from
+  its first Current release to End-of-Life. LTS release lines have alphabetically-ordered
+  code names, beginning with Node.js 4 Argon.
+* **Nightly**: Code from the `main` branch built every 24-hours when there are
+  changes. Unlike Alpha releases, nightly builds are automated and untested.
+  Use with caution.
+
+Release lines up to and including Node.js 26 follow the previous schedule, where a
+new major version was released every 6 months and only even-numbered major
+versions became LTS. See the
+[Node.js release schedule announcement](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)
+for details.
+
 For more information, see the
 [Release README](https://github.com/nodejs/Release#readme).
 
@@ -182,8 +194,6 @@ For information about the governance of the Node.js project, see
   **Ruy Adorno** <<ruy@vlt.sh>> (he/him)
 * [ShogunPanda](https://github.com/ShogunPanda) -
   **Paolo Insogna** <<paolo@cowtech.it>> (he/him)
-* [targos](https://github.com/targos) -
-  **Michaël Zasso** <<targos@protonmail.com>> (he/him)
 * [tniessen](https://github.com/tniessen) -
   **Tobias Nießen** <<tniessen@tnie.de>> (he/him)
 
@@ -260,6 +270,8 @@ For information about the governance of the Node.js project, see
   **Sam Roberts** <<vieuxtech@gmail.com>>
 * [shigeki](https://github.com/shigeki) -
   **Shigeki Ohtsu** <<ohtsu@ohtsu.org>> (he/him)
+* [targos](https://github.com/targos) -
+  **Michaël Zasso** <<targos@protonmail.com>> (he/him)
 * [thefourtheye](https://github.com/thefourtheye) -
   **Sakthipriyan Vairamani** <<thechargingvolcano@gmail.com>> (he/him)
 * [TimothyGu](https://github.com/TimothyGu) -
@@ -285,6 +297,8 @@ For information about the governance of the Node.js project, see
   **Antoine du Hamel** <<duhamelantoine1995@gmail.com>> (he/him) - [Support me](https://github.com/sponsors/aduh95)
 * [anonrig](https://github.com/anonrig) -
   **Yagiz Nizipli** <<yagiz@nizipli.com>> (he/him) - [Support me](https://github.com/sponsors/anonrig)
+* [araujogui](https://github.com/araujogui) -
+  **Guilherme Araújo** <<arauujogui@gmail.com>> (he/him)
 * [atlowChemi](https://github.com/atlowChemi) -
   **Chemi Atlow** <<chemi@atlow.co.il>> (he/him)
 * [avivkeller](https://github.com/avivkeller) -
@@ -307,6 +321,8 @@ For information about the governance of the Node.js project, see
   **Christian Clauss** <<cclauss@me.com>> (he/him)
 * [ChALkeR](https://github.com/ChALkeR) -
   **Сковорода Никита Андреевич** <<chalkerx@gmail.com>> (he/him)
+* [christianaurichzm](https://github.com/christianaurichzm) -
+  **Christian Aurich Zanettini Martins** <<christian.aurichzm@gmail.com>> (he/him)
 * [cjihrig](https://github.com/cjihrig) -
   **Colin Ihrig** <<cjihrig@gmail.com>> (he/him)
 * [codebytere](https://github.com/codebytere) -
@@ -319,6 +335,8 @@ For information about the governance of the Node.js project, see
   **Dario Piotrowicz** <<dario.piotrowicz@gmail.com>> (he/him)
 * [deokjinkim](https://github.com/deokjinkim) -
   **Deokjin Kim** <<deokjin81.kim@gmail.com>> (he/him)
+* [efekrskl](https://github.com/efekrskl) -
+  **Efe Karasakal** <<hi@efe.dev>> (he/him)
 * [ErickWendel](https://github.com/ErickWendel) -
   **Erick Wendel** <<erick.workspace@gmail.com>> (he/him)
 * [Ethan-Arrowood](https://github.com/Ethan-Arrowood) -
@@ -401,6 +419,8 @@ For information about the governance of the Node.js project, see
   **Filip Skokan** <<panva.ip@gmail.com>> (he/him) - [Support me](https://github.com/sponsors/panva)
 * [pimterry](https://github.com/pimterry) -
   **Tim Perry** <<pimterry@gmail.com>> (he/him)
+* [pipobscure](https://github.com/pipobscure) -
+  **Philipp Dunkel** <<pip@pipobscure.com>> (he/him)
 * [pmarchini](https://github.com/pmarchini) -
   **Pietro Marchini** <<pietro.marchini94@gmail.com>> (he/him)
 * [Qard](https://github.com/Qard) -
@@ -429,8 +449,6 @@ For information about the governance of the Node.js project, see
   **Stefan Stojanovic** <<stefan.stojanovic@janeasystems.com>> (he/him)
 * [sxa](https://github.com/sxa) -
   **Stewart X Addison** <<sxa@redhat.com>> (he/him)
-* [targos](https://github.com/targos) -
-  **Michaël Zasso** <<targos@protonmail.com>> (he/him)
 * [theanarkh](https://github.com/theanarkh) -
   **theanarkh** <<theratliter@gmail.com>> (he/him)
 * [tniessen](https://github.com/tniessen) -
@@ -445,6 +463,8 @@ For information about the governance of the Node.js project, see
   **Vladimir Morozov** <<vmorozov@microsoft.com>> (he/him)
 * [watilde](https://github.com/watilde) -
   **Daijiro Wachi** <<daijiro.wachi@gmail.com>> (he/him)
+* [XadillaX](https://github.com/XadillaX) -
+  **Khaidi Chu** <<i@2333.moe>> (he/him)
 * [ZYSzys](https://github.com/ZYSzys) -
   **Yongsheng Zhang** <<zyszys98@gmail.com>> (he/him)
 
@@ -699,6 +719,8 @@ For information about the governance of the Node.js project, see
   **Weijia Wang** <<starkwang@126.com>>
 * [stefanmb](https://github.com/stefanmb) -
   **Stefan Budeanu** <<stefan@budeanu.com>>
+* [targos](https://github.com/targos) -
+  **Michaël Zasso** <<targos@protonmail.com>> (he/him)
 * [tellnes](https://github.com/tellnes) -
   **Christian Tellnes** <<christian@tellnes.no>>
 * [thefourtheye](https://github.com/thefourtheye) -
@@ -723,8 +745,6 @@ For information about the governance of the Node.js project, see
   **Thomas Watson** <<w@tson.dk>>
 * [whitlockjc](https://github.com/whitlockjc) -
   **Jeremy Whitlock** <<jwhitlock@apache.org>>
-* [XadillaX](https://github.com/XadillaX) -
-  **Khaidi Chu** <<i@2333.moe>> (he/him)
 * [yashLadha](https://github.com/yashLadha) -
   **Yash Ladha** <<yash@yashladha.in>> (he/him)
 * [yhwang](https://github.com/yhwang) -
@@ -759,8 +779,12 @@ maintaining the Node.js project.
   **Haram Jeong** <<haramj.dev@gmail.com>>
 * [HBSPS](https://github.com/HBSPS) -
   **Wiyeong Seo** <<hbsps.dev@gmail.com>>
+* [HoonDongKang](https://github.com/HoonDongKang) -
+  **Donghoon Kang** <<d159123@gmail.com>>
 * [iam-frankqiu](https://github.com/iam-frankqiu) -
   **Frank Qiu** <<iam.frankqiu@gmail.com>> (he/him)
+* [inoway46](https://github.com/inoway46) -
+  **Yuya Inoue** <<inoueyuya416@gmail.com>> (he/him)
 * [milesguicent](https://github.com/milesguicent) -
   **Miles Guicent** <<guicent@pm.me>> (he/him)
 * [preveen-stack](https://github.com/preveen-stack) -
@@ -779,8 +803,6 @@ Primary GPG keys for Node.js Releasers (some Releasers sign with subkeys):
   `DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7`
 * **Marco Ippolito** <<marcoippolito54@gmail.com>>
   `CC68F5A3106FF448322E48ED27F5E38D5B0A215F`
-* **Michaël Zasso** <<targos@protonmail.com>>
-  `8FCCA13FEF1D0C2E91008E09770F7A9A5AE15600`
 * **Rafael Gonzaga** <<rafael.nunu@hotmail.com>>
   `890C08DB8579162FEE0DF9DB8BEAB4DFCF555EF4`
 * **Richard Lau** <<richard.lau@ibm.com>>
@@ -802,7 +824,6 @@ that server.
 gpg --keyserver hkps://keys.openpgp.org --recv-keys 5BE8A3F6C8A5C01D106C0AD820B1A390B168D356 # Antoine du Hamel
 gpg --keyserver hkps://keys.openpgp.org --recv-keys DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7 # Juan José Arboleda
 gpg --keyserver hkps://keys.openpgp.org --recv-keys CC68F5A3106FF448322E48ED27F5E38D5B0A215F # Marco Ippolito
-gpg --keyserver hkps://keys.openpgp.org --recv-keys 8FCCA13FEF1D0C2E91008E09770F7A9A5AE15600 # Michaël Zasso
 gpg --keyserver hkps://keys.openpgp.org --recv-keys 890C08DB8579162FEE0DF9DB8BEAB4DFCF555EF4 # Rafael Gonzaga
 gpg --keyserver hkps://keys.openpgp.org --recv-keys C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C # Richard Lau
 gpg --keyserver hkps://keys.openpgp.org --recv-keys 108F52B48DB57BB0CC439B2997B01419BD92F80A # Ruy Adorno
@@ -846,6 +867,8 @@ verify a downloaded file.
   `61FC681DFB92A079F1685E77973F295594EC4689`
 * **Julien Gilli** <<jgilli@fastmail.fm>>
   `114F43EE0176B71C7BC219DD50A3051F888C628D`
+* **Michaël Zasso** <<targos@protonmail.com>>
+  `8FCCA13FEF1D0C2E91008E09770F7A9A5AE15600`
 * **Myles Borins** <<myles.borins@gmail.com>>
   `C4F0DFFF4E8C1A8236409D08E73BC641CC11F4C8`
 * **Rod Vagg** <<rod@vagg.org>>

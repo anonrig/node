@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // VFS dispatch on the async callback fs methods must surface provider errors
@@ -9,14 +9,11 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const baseMountPoint = path.resolve('/tmp/vfs-cb-err-' + process.pid);
-let counter = 0;
 function mounted() {
-  const mountPoint = baseMountPoint + '-' + (counter++);
   const myVfs = vfs.create();
   myVfs.mkdirSync('/src', { recursive: true });
   myVfs.writeFileSync('/src/hello.txt', 'hello');
-  myVfs.mount(mountPoint);
+  const mountPoint = myVfs.mount();
   return { myVfs, mountPoint };
 }
 

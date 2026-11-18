@@ -397,6 +397,32 @@ error object, such as a {Proxy}.
 Indicates the failure of an assertion. For details, see
 [`Class: assert.AssertionError`][].
 
+## Class: `DOMException`
+
+<!-- YAML
+added: v17.0.0
+-->
+
+* Extends: {errors.Error}
+
+The Web IDL {DOMException} class. These errors are thrown by web-platform APIs
+in Node.js such as [`fetch()`][], {AbortController}, {AbortSignal}, and Web
+Streams. For details, see also [`Class: DOMException`][] on the Globals page.
+
+The [`domException.name`][] property identifies the type of the exception (for
+example, `'AbortError'`). Unlike most errors in Node.js, the
+[`domException.code`][] property is a number that corresponds to a
+[legacy error code name][Web IDL error names] (for example, `20` for
+`ABORT_ERR`).
+
+Node.js-specific APIs that support {AbortSignal} (such as
+[`events.once()`][]) throw a Node.js `AbortError` (a native {errors.Error} with
+`name` of `'AbortError'` and `code` of [`'ABORT_ERR'`][ABORT_ERR]) rather than a
+{DOMException}. To identify abort errors in either case, checking
+`err?.name === 'AbortError'` is sufficient.
+
+See also [`ABORT_ERR`][].
+
 ## Class: `RangeError`
 
 * Extends: {errors.Error}
@@ -707,13 +733,6 @@ by the `node:assert` module.
 An attempt was made to register something that is not a function as an
 `AsyncHooks` callback.
 
-<a id="ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED"></a>
-
-### `ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED`
-
-An operation related to module loading is customized by an asynchronous loader
-hook that never settled the promise before the loader thread exits.
-
 <a id="ERR_ASYNC_RESOURCE_DOMAIN_REMOVED"></a>
 
 ### `ERR_ASYNC_RESOURCE_DOMAIN_REMOVED`
@@ -885,9 +904,8 @@ Argon2 is not supported by the current version of OpenSSL being used.
 
 ### `ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED`
 
-An OpenSSL engine was requested (for example, through the `clientCertEngine` or
-`privateKeyEngine` TLS options) that is not supported by the version of OpenSSL
-being used, likely due to the compile-time flag `OPENSSL_NO_ENGINE`.
+An OpenSSL engine-based TLS or HTTPS option was used after support for custom
+engines reached End-of-Life in Node.js.
 
 <a id="ERR_CRYPTO_ECDH_INVALID_FORMAT"></a>
 
@@ -903,13 +921,6 @@ class `getPublicKey()` method.
 An invalid value for the `key` argument has been passed to the
 `crypto.ECDH()` class `computeSecret()` method. It means that the public
 key lies outside of the elliptic curve.
-
-<a id="ERR_CRYPTO_ENGINE_UNKNOWN"></a>
-
-### `ERR_CRYPTO_ENGINE_UNKNOWN`
-
-An invalid crypto engine identifier was passed to
-[`require('node:crypto').setEngine()`][].
 
 <a id="ERR_CRYPTO_FIPS_FORCED"></a>
 
@@ -936,7 +947,7 @@ be called no more than one time per instance of a `Hash` object.
 
 ### `ERR_CRYPTO_HASH_UPDATE_FAILED`
 
-[`hash.update()`][] failed for any reason. This should rarely, if ever, happen.
+[`hash.update()`][] failed for an unspecified reason.
 
 <a id="ERR_CRYPTO_INCOMPATIBLE_KEY"></a>
 
@@ -1052,6 +1063,18 @@ An invalid key type was provided.
 
 The given crypto key object's type is invalid for the attempted operation.
 
+<a id="ERR_CRYPTO_INVALID_MAC"></a>
+
+### `ERR_CRYPTO_INVALID_MAC`
+
+<!-- YAML
+added:
+  - v26.9.0
+  - v24.22.0
+-->
+
+An invalid MAC algorithm was specified.
+
 <a id="ERR_CRYPTO_INVALID_MESSAGELEN"></a>
 
 ### `ERR_CRYPTO_INVALID_MESSAGELEN`
@@ -1090,6 +1113,16 @@ added: v15.0.0
 
 An invalid authentication tag length was provided.
 
+<a id="ERR_CRYPTO_INVALID_X509_CERTIFICATE"></a>
+
+### `ERR_CRYPTO_INVALID_X509_CERTIFICATE`
+
+<!-- YAML
+added: v27.0.0-alpha.0.1.0
+-->
+
+An X.509 certificate field could not be inspected.
+
 <a id="ERR_CRYPTO_JOB_INIT_FAILED"></a>
 
 ### `ERR_CRYPTO_JOB_INIT_FAILED`
@@ -1124,6 +1157,43 @@ added: v24.7.0
 
 Attempted to use KEM operations while Node.js was not compiled with
 OpenSSL with KEM support.
+
+<a id="ERR_CRYPTO_MAC_FINALIZED"></a>
+
+### `ERR_CRYPTO_MAC_FINALIZED`
+
+<!-- YAML
+added:
+  - v26.9.0
+  - v24.22.0
+-->
+
+An operation was attempted on a `Mac` object after finalization was attempted
+or an underlying MAC update failed.
+
+<a id="ERR_CRYPTO_MAC_NOT_SUPPORTED"></a>
+
+### `ERR_CRYPTO_MAC_NOT_SUPPORTED`
+
+<!-- YAML
+added:
+  - v26.9.0
+  - v24.22.0
+-->
+
+Node.js was built without support for the OpenSSL `EVP_MAC` API.
+
+<a id="ERR_CRYPTO_MAC_UPDATE_FAILED"></a>
+
+### `ERR_CRYPTO_MAC_UPDATE_FAILED`
+
+<!-- YAML
+added:
+  - v26.9.0
+  - v24.22.0
+-->
+
+[`mac.update()`][] failed for an unspecified reason.
 
 <a id="ERR_CRYPTO_OPERATION_FAILED"></a>
 
@@ -1686,6 +1756,14 @@ provided.
 ### `ERR_HTTP2_SESSION_ERROR`
 
 The `Http2Session` closed with a non-zero error code.
+
+<a id="ERR_HTTP2_SESSION_MEMORY_EXCEEDED"></a>
+
+### `ERR_HTTP2_SESSION_MEMORY_EXCEEDED`
+
+A request was rejected before being sent because the `Http2Session` was using
+more memory than its `maxSessionMemory` setting allows. Nothing was sent to the
+peer, so the request can be retried. The session remains usable.
 
 <a id="ERR_HTTP2_SETTINGS_CANCEL"></a>
 
@@ -2287,19 +2365,6 @@ for more information.
 
 IP is blocked by `net.BlockList`.
 
-<a id="ERR_LOADER_CHAIN_INCOMPLETE"></a>
-
-### `ERR_LOADER_CHAIN_INCOMPLETE`
-
-<!-- YAML
-added:
-  - v18.6.0
-  - v16.17.0
--->
-
-An ESM loader hook returned without calling `next()` and without explicitly
-signaling a short circuit.
-
 <a id="ERR_LOAD_SQLITE_EXTENSION"></a>
 
 ### `ERR_LOAD_SQLITE_EXTENSION`
@@ -2549,7 +2614,9 @@ package specifier mapping.
 ### `ERR_PACKAGE_MAP_EXTERNAL_FILE`
 
 <!-- YAML
-added: v26.4.0
+added:
+ - v26.4.0
+ - v24.20.0
 -->
 
 A module attempted to resolve a bare specifier using the [package map][], but
@@ -2569,7 +2636,9 @@ covers the importing file.
 ### `ERR_PACKAGE_MAP_INVALID`
 
 <!-- YAML
-added: v26.4.0
+added:
+ - v26.4.0
+ - v24.20.0
 -->
 
 The [package map][] configuration file is invalid. This can occur when:
@@ -2590,7 +2659,9 @@ Error [ERR_PACKAGE_MAP_INVALID]: Invalid package map at "./missing.json": file n
 ### `ERR_PACKAGE_MAP_KEY_NOT_FOUND`
 
 <!-- YAML
-added: v26.4.0
+added:
+ - v26.4.0
+ - v24.20.0
 -->
 
 A package's `dependencies` object in the [package map][] references a package
@@ -2757,7 +2828,9 @@ Opening a QUIC stream failed.
 ### `ERR_QUIC_STREAM_ABORTED`
 
 <!-- YAML
-added: v26.2.0
+added:
+ - v26.2.0
+ - v24.20.0
 -->
 
 > Stability: 1 - Experimental
@@ -2770,7 +2843,9 @@ or session with an explicit application or transport error code.
 ### `ERR_QUIC_STREAM_RESET`
 
 <!-- YAML
-added: v26.2.0
+added:
+ - v26.2.0
+ - v24.20.0
 -->
 
 > Stability: 1 - Experimental
@@ -2812,7 +2887,9 @@ A QUIC session failed because version negotiation is required.
 
 <!-- YAML
 changes:
-  - version: v26.5.0
+  - version:
+     - v26.5.0
+     - v24.20.0
     pr-url: https://github.com/nodejs/node/pull/64260
     description: Added the `requireStack` and `topLevelAwaitLocations` properties.
 -->
@@ -2884,6 +2961,22 @@ added:
 
 An attempt was made to `require()` an [ES Module][] while another `import()` call
 was already in progress to load it asynchronously.
+
+<a id="ERR_RX_MEMORY_NOT_SUPPORTED"></a>
+
+### `ERR_RX_MEMORY_NOT_SUPPORTED`
+
+<!-- YAML
+added: v26.12.0
+-->
+
+A feature requiring runtime allocation of executable memory was used in an
+environment where that capability is unavailable. This includes creating an
+otherwise eligible FFI Fast API function, or allocating an FFI callback when
+libffi cannot provide a closure and executable memory is unavailable.
+
+Node.js does not guarantee a non-generated-code fallback for these operations.
+This error can be caught without terminating the process.
 
 <a id="ERR_SCRIPT_EXECUTION_INTERRUPTED"></a>
 
@@ -3004,8 +3097,9 @@ A call was made and the UDP subsystem was not running.
 ### `ERR_SOCKET_HANDLE_ADOPTED`
 
 An operation was attempted on a [`BoundSocket`][] that had already been adopted
-by a [`net.Server`][] or [`net.Socket`][]. Once a bound socket is adopted, its
-`address()` and `close()` methods can no longer be used.
+by a [`net.Server`][] or [`net.Socket`][], or transferred to another thread.
+Once a bound socket is adopted or transferred, its `address()` and `close()`
+methods can no longer be used.
 
 <a id="ERR_SOURCE_MAP_CORRUPT"></a>
 
@@ -3159,6 +3253,13 @@ This error represents a failed test. Additional information about the failure
 is available via the `cause` property. The `failureType` property specifies
 what the test was doing when the failure occurred.
 
+<a id="ERR_THROTTLED"></a>
+
+### `ERR_THROTTLED`
+
+A call was dropped because a throttled function could not invoke it immediately
+or its pending queue was full.
+
 <a id="ERR_TLS_ALPN_CALLBACK_INVALID_RESULT"></a>
 
 ### `ERR_TLS_ALPN_CALLBACK_INVALID_RESULT`
@@ -3301,7 +3402,8 @@ category.
 ### `ERR_TRACE_EVENTS_UNAVAILABLE`
 
 The `node:trace_events` module could not be loaded because Node.js was compiled
-with the `--without-v8-platform` flag.
+with the `--without-v8-platform` flag, or because the process was initialized by
+an embedder that provides its own V8 platform.
 
 <a id="ERR_TRAILING_JUNK_AFTER_STREAM_END"></a>
 
@@ -3477,6 +3579,24 @@ An attempt was made to use something that was already closed.
 While using the Performance Timing API (`perf_hooks`), no valid performance
 entry types are found.
 
+<a id="ERR_VFS_INVALID_TARGET"></a>
+
+### `ERR_VFS_INVALID_TARGET`
+
+A `--vfs-load` source does not exist, is neither a regular file nor a
+directory, or is a source no provider claims.
+
+<a id="ERR_VFS_NOT_MOUNTED"></a>
+
+### `ERR_VFS_NOT_MOUNTED`
+
+A path into a virtual file system was used in a thread in which that virtual
+file system is not mounted. Each thread has its own mounts: a virtual file
+system mounted with [`vfs.mount()`][] is not mounted in the [`Worker`][]
+threads, so a worker cannot be started from a script in it. The source
+mounted with [`--vfs-load`][] and the virtual file system of a
+[single executable application][] are mounted in every thread.
+
 <a id="ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING"></a>
 
 ### `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`
@@ -3558,6 +3678,11 @@ A feature requiring WebAssembly was used, but WebAssembly is not supported or
 has been disabled in the current environment (for example, when running with
 `--jitless`).
 
+TypeScript parsing and WebAssembly module imports, including source phase
+imports, report this error when WebAssembly is unavailable. Node.js does not
+provide an alternative implementation for these operations. This error can be
+caught without terminating the process.
+
 <a id="ERR_WEBASSEMBLY_RESPONSE"></a>
 
 ### `ERR_WEBASSEMBLY_RESPONSE`
@@ -3573,9 +3698,10 @@ The `Response` that has been passed to `WebAssembly.compileStreaming` or to
 
 ### `ERR_WORKER_HANDLE_NOT_TRANSFERABLE`
 
-An attempt was made to transfer a `net.Socket` or `net.Server` to another thread
-via a `worker_threads` `postMessage()` call while it was not in a transferable
-state, for example because it had already started reading or had buffered data.
+An attempt was made to transfer a `net.Socket`, `net.Server` or
+`net.BoundSocket` to another thread via a `worker_threads` `postMessage()` call
+while it was not in a transferable state, for example because it had already
+started reading, had buffered data, or had already been adopted.
 
 <a id="ERR_WORKER_INIT_FAILED"></a>
 
@@ -3798,6 +3924,17 @@ attempting a [`require()`][] operation or when loading the program entry point.
 > Stability: 0 - Deprecated. These error codes are either inconsistent, or have
 > been removed.
 
+<a id="ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED"></a>
+
+### `ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED`
+
+<!-- YAML
+removed: REPLACEME
+-->
+
+An operation related to module loading is customized by an asynchronous loader
+hook that never settled the promise before the loader thread exits.
+
 <a id="ERR_CANNOT_TRANSFER_OBJECT"></a>
 
 ### `ERR_CANNOT_TRANSFER_OBJECT`
@@ -3819,6 +3956,17 @@ removed: v15.0.0
 -->
 
 The native call from `process.cpuUsage` could not be processed.
+
+<a id="ERR_CRYPTO_ENGINE_UNKNOWN"></a>
+
+### `ERR_CRYPTO_ENGINE_UNKNOWN`
+
+<!-- YAML
+removed: v27.0.0-alpha.0.0.0
+-->
+
+An invalid crypto engine identifier was passed to
+`require('node:crypto').setEngine()`.
 
 <a id="ERR_CRYPTO_HASH_DIGEST_NO_UTF16"></a>
 
@@ -4024,6 +4172,20 @@ changes:
 -->
 
 An invalid transfer object was passed to `postMessage()`.
+
+<a id="ERR_LOADER_CHAIN_INCOMPLETE"></a>
+
+### `ERR_LOADER_CHAIN_INCOMPLETE`
+
+<!-- YAML
+added:
+  - v18.6.0
+  - v16.17.0
+removed: REPLACEME
+-->
+
+An ESM loader hook returned without calling `next()` and without explicitly
+signaling a short circuit.
 
 <a id="ERR_MANIFEST_ASSERT_INTEGRITY"></a>
 
@@ -4627,6 +4789,7 @@ The public key in the certificate SubjectPublicKeyInfo could not be read.
 
 An error occurred trying to allocate memory. This should never happen.
 
+[ABORT_ERR]: #abort_err
 [ES Module]: esm.md
 [ICU]: intl.md#internationalization-support
 [JSON Web Key Elliptic Curve Registry]: https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
@@ -4640,6 +4803,7 @@ An error occurred trying to allocate memory. This should never happen.
 [V8's stack trace API]: https://v8.dev/docs/stack-trace-api
 [WHATWG Supported Encodings]: util.md#whatwg-supported-encodings
 [WHATWG URL API]: url.md#the-whatwg-url-api
+[Web IDL error names]: https://webidl.spec.whatwg.org/#dfn-error-names-table
 [`"exports"`]: packages.md#exports
 [`"imports"`]: packages.md#imports
 [`'uncaughtException'`]: process.md#event-uncaughtexception
@@ -4647,7 +4811,10 @@ An error occurred trying to allocate memory. This should never happen.
 [`--force-fips`]: cli.md#--force-fips
 [`--no-addons`]: cli.md#--no-addons
 [`--unhandled-rejections`]: cli.md#--unhandled-rejectionsmode
+[`--vfs-load`]: cli.md#--vfs-loadsource
+[`ABORT_ERR`]: #abort_err
 [`BoundSocket`]: net.md#class-netboundsocket
+[`Class: DOMException`]: globals.md#class-domexception
 [`Class: assert.AssertionError`]: assert.md#class-assertassertionerror
 [`ERR_INCOMPATIBLE_OPTION_PAIR`]: #err_incompatible_option_pair
 [`ERR_INVALID_ARG_TYPE`]: #err_invalid_arg_type
@@ -4663,6 +4830,7 @@ An error occurred trying to allocate memory. This should never happen.
 [`REPL`]: repl.md
 [`ServerResponse`]: http.md#class-httpserverresponse
 [`Temporal`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal
+[`Worker`]: worker_threads.md#class-worker
 [`Writable`]: stream.md#class-streamwritable
 [`ZipBuffer`]: zlib.md#class-zlibzipbuffer
 [`ZipFile`]: zlib.md#class-zlibzipfile
@@ -4676,10 +4844,13 @@ An error occurred trying to allocate memory. This should never happen.
 [`dgram.createSocket()`]: dgram.md#dgramcreatesocketoptions-callback
 [`dgram.disconnect()`]: dgram.md#socketdisconnect
 [`dgram.remoteAddress()`]: dgram.md#socketremoteaddress
+[`domException.code`]: https://developer.mozilla.org/en-US/docs/Web/API/DOMException/code
 [`domException.name`]: https://developer.mozilla.org/en-US/docs/Web/API/DOMException/name
 [`errno`(3) man page]: https://man7.org/linux/man-pages/man3/errno.3.html
 [`error.code`]: #errorcode
 [`error.message`]: #errormessage
+[`events.once()`]: events.md#eventsonceemitter-name-options
+[`fetch()`]: globals.md#fetch
 [`fs.Dir`]: fs.md#class-fsdir
 [`fs.cp()`]: fs.md#fscpsrc-dest-options-callback
 [`fs.readFileSync`]: fs.md#fsreadfilesyncpath-options
@@ -4693,6 +4864,7 @@ An error occurred trying to allocate memory. This should never happen.
 [`http`]: http.md
 [`https`]: https.md
 [`libuv Error handling`]: https://docs.libuv.org/en/v1.x/errors.html
+[`mac.update()`]: crypto.md#macupdatedata-inputencoding
 [`net.Server`]: net.md#class-netserver
 [`net.Socket.write()`]: net.md#socketwritedata-encoding-callback
 [`net.Socket`]: net.md#class-netsocket
@@ -4707,7 +4879,6 @@ An error occurred trying to allocate memory. This should never happen.
 [`process.send()`]: process.md#processsendmessage-sendhandle-options-callback
 [`process.setUncaughtExceptionCaptureCallback()`]: process.md#processsetuncaughtexceptioncapturecallbackfn
 [`readable._read()`]: stream.md#readable_readsize
-[`require('node:crypto').setEngine()`]: crypto.md#cryptosetengineengine-flags
 [`require()`]: modules.md#requireid
 [`server.close()`]: net.md#serverclosecallback
 [`server.listen()`]: net.md#serverlisten
@@ -4723,6 +4894,7 @@ An error occurred trying to allocate memory. This should never happen.
 [`util.inspect()`]: util.md#utilinspectobject-options
 [`util.parseArgs()`]: util.md#utilparseargsconfig
 [`v8.startupSnapshot.setDeserializeMainFunction()`]: v8.md#v8startupsnapshotsetdeserializemainfunctioncallback-data
+[`vfs.mount()`]: vfs.md#vfsmount
 [`zlib`]: zlib.md
 [crypto digest algorithm]: crypto.md#cryptogethashes
 [debugger]: debugger.md
@@ -4733,6 +4905,7 @@ An error occurred trying to allocate memory. This should never happen.
 [package map]: packages.md#package-maps
 [relative URL]: https://url.spec.whatwg.org/#relative-url-string
 [self-reference a package using its name]: packages.md#self-referencing-a-package-using-its-name
+[single executable application]: single-executable-applications.md#virtual-file-system-vfs-for-assets
 [special scheme]: https://url.spec.whatwg.org/#special-scheme
 [stream-based]: stream.md
 [syscall]: https://man7.org/linux/man-pages/man2/syscalls.2.html

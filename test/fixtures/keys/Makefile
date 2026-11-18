@@ -1,4 +1,9 @@
 all: \
+  name-constraints-ca-cert.pem \
+  name-constraints-permitted-cert.pem \
+  name-constraints-excluded-cert.pem \
+  name-constraints-dns-san-cert.pem \
+  name-constraints-email-san-cert.pem \
   ca1-cert.pem \
   ca2-cert.pem \
   ca2-crl.pem \
@@ -7,6 +12,10 @@ all: \
   ca4-cert.pem \
   ca5-cert.pem \
   ca6-cert.pem \
+  blocked-ca-cert.pem \
+  blocked-ca-leaf-cert.pem \
+  blocked-key-leaf-cert.pem \
+  cert-without-key-fips.pfx \
   agent1-cert.pem \
   agent1-fips.pfx \
   agent1.pfx \
@@ -70,6 +79,7 @@ all: \
   rsa_spkac.spkac \
   rsa_spkac_invalid.spkac \
   rsa_private_2048.pem \
+  rsa_private_2048_3_primes.pem \
   rsa_private_4096.pem \
   rsa_public_2048.pem \
   rsa_public_4096.pem \
@@ -103,6 +113,8 @@ all: \
   incorrect_san_correct_subject-key.pem \
   irrelevant_san_correct_subject-cert.pem \
   irrelevant_san_correct_subject-key.pem \
+  non-canonical-ip-dns-cert.pem \
+  non-canonical-ip-dns-key.pem \
   ml_dsa_44_private.pem \
   ml_dsa_44_private_seed_only.pem \
   ml_dsa_44_private_priv_only.pem \
@@ -215,6 +227,79 @@ ca3-cert.pem: ca3-csr.pem ca3-key.pem ca3.cnf ca1-cert.pem ca1-key.pem
 		-CAkey ca1-key.pem \
 		-CAcreateserial \
 		-out ca3-cert.pem
+
+#
+# blocked-ca is a subordinate CA issued by ca1 whose public key is on the
+# compiled-in SPKI blocklist (src/crypto/crypto_context.cc). Any chain that
+# contains this key must be rejected, so it is used to test the blocklist.
+# The certificates can be regenerated freely; the key cannot (see below).
+# blocked-ca-leaf is a server cert issued by blocked-ca; blocked-key-leaf is
+# a server cert issued by ca1 that reuses the blocked key itself.
+# ('password' is used for the CA password.)
+#
+# The SHA-256 of this key's SubjectPublicKeyInfo is compiled into
+# src/crypto/crypto_context.cc, so the key is pinned: it is kept across
+# `make clean` and never regenerated here. Rotating it means updating the
+# digest and fingerprint in that file as well.
+blocked-ca-key.pem:
+	@echo "$@ is pinned (see src/crypto/crypto_context.cc); restore it with: git checkout -- $@" >&2
+	@exit 1
+
+blocked-ca-csr.pem: blocked-ca.cnf blocked-ca-key.pem
+	openssl req -new \
+		-extensions v3_ca \
+		-config blocked-ca.cnf \
+		-key blocked-ca-key.pem \
+		-out blocked-ca-csr.pem
+
+blocked-ca-cert.pem: blocked-ca-csr.pem blocked-ca-key.pem blocked-ca.cnf ca1-cert.pem ca1-key.pem
+	openssl x509 -req \
+		-extfile blocked-ca.cnf \
+		-extensions v3_ca \
+		-days 99999 \
+		-passin "pass:password" \
+		-in blocked-ca-csr.pem \
+		-CA ca1-cert.pem \
+		-CAkey ca1-key.pem \
+		-CAcreateserial \
+		-out blocked-ca-cert.pem
+
+blocked-ca-leaf-key.pem:
+	openssl genrsa -out blocked-ca-leaf-key.pem 2048
+
+blocked-ca-leaf-csr.pem: blocked-ca-leaf.cnf blocked-ca-leaf-key.pem
+	openssl req -new \
+		-config blocked-ca-leaf.cnf \
+		-key blocked-ca-leaf-key.pem \
+		-out blocked-ca-leaf-csr.pem
+
+blocked-ca-leaf-cert.pem: blocked-ca-leaf-csr.pem blocked-ca-cert.pem blocked-ca-key.pem
+	openssl x509 -req \
+		-days 99999 \
+		-in blocked-ca-leaf-csr.pem \
+		-CA blocked-ca-cert.pem \
+		-CAkey blocked-ca-key.pem \
+		-CAcreateserial \
+		-extfile blocked-ca-leaf.cnf \
+		-out blocked-ca-leaf-cert.pem
+	cat blocked-ca-cert.pem >> blocked-ca-leaf-cert.pem
+
+blocked-key-leaf-csr.pem: blocked-key-leaf.cnf blocked-ca-key.pem
+	openssl req -new \
+		-config blocked-key-leaf.cnf \
+		-key blocked-ca-key.pem \
+		-out blocked-key-leaf-csr.pem
+
+blocked-key-leaf-cert.pem: blocked-key-leaf-csr.pem ca1-cert.pem ca1-key.pem
+	openssl x509 -req \
+		-days 99999 \
+		-passin "pass:password" \
+		-in blocked-key-leaf-csr.pem \
+		-CA ca1-cert.pem \
+		-CAkey ca1-key.pem \
+		-CAcreateserial \
+		-extfile blocked-key-leaf.cnf \
+		-out blocked-key-leaf-cert.pem
 
 #
 # Create Subordinate Certificate Authority: ca4 issued by ca2
@@ -815,6 +900,18 @@ ec-fips.pfx: ec-cert.pem ec-key.pem
 		-out ec-fips.pfx \
 		-password pass:password
 
+# A bundle of certificates with no private key. See agent1-fips.pfx for why the
+# FIPS fixture uses PBMAC1.
+cert-without-key-fips.pfx: ca1-cert.pem
+	openssl pkcs12 -export \
+		-nokeys \
+		-certpbe AES-256-CBC \
+		-iter 2048 \
+		-pbmac1_pbkdf2 \
+		-in ca1-cert.pem \
+		-out cert-without-key-fips.pfx \
+		-password pass:password
+
 dh512.pem:
 	openssl dhparam -out dh512.pem 512
 
@@ -843,7 +940,8 @@ dsa_private.pem: dsa_params.pem
 	openssl gendsa -out dsa_private.pem dsa_params.pem
 
 dsa_private_encrypted.pem: dsa_private.pem
-	openssl dsa -aes256 -in dsa_private.pem -passout 'pass:password' -out dsa_private_encrypted.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 2048 -saltlen 16 \
+	  -in $< -passout 'pass:password' -out $@
 
 dsa_private_pkcs8.pem: dsa_private.pem
 	openssl pkcs8 -topk8 -inform PEM -outform PEM -in dsa_private.pem -out dsa_private_pkcs8.pem -nocrypt
@@ -867,7 +965,8 @@ rsa_private.pem:
 	openssl genrsa -out rsa_private.pem 2048
 
 rsa_private_encrypted.pem: rsa_private.pem
-	openssl rsa -aes256 -in rsa_private.pem -passout 'pass:password' -out rsa_private_encrypted.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 2048 -saltlen 16 \
+	  -in $< -passout 'pass:password' -out $@
 
 rsa_private_pkcs8.pem: rsa_private.pem
 	openssl pkcs8 -topk8 -inform PEM -outform PEM -in rsa_private.pem -out rsa_private_pkcs8.pem -nocrypt
@@ -926,6 +1025,13 @@ rsa_spkac_invalid.spkac: rsa_spkac.spkac
 
 rsa_private_2048.pem:
 	openssl genrsa -out rsa_private_2048.pem 2048
+
+rsa_private_2048_3_primes.pem:
+	openssl genpkey \
+		-algorithm RSA \
+		-pkeyopt rsa_keygen_bits:2048 \
+		-pkeyopt rsa_keygen_primes:3 \
+		-out rsa_private_2048_3_primes.pem
 
 rsa_private_4096.pem:
 	openssl genrsa -out rsa_private_4096.pem 4096
@@ -1235,8 +1341,54 @@ irrelevant_san_correct_subject-cert.pem: irrelevant_san_correct_subject-key.pem
 irrelevant_san_correct_subject-key.pem:
 	openssl ecparam -name prime256v1 -genkey -noout -out irrelevant_san_correct_subject-key.pem
 
+# Certificates for DNS name constraints with CN fallback.
+# Reuse the existing ca1 and agent1 private keys.
+name-constraints-ca-cert.pem: name-constraints.cnf ca1-key.pem
+	openssl req -new -x509 -sha256 -days 99999 -set_serial 1 \
+		-config name-constraints.cnf -key ca1-key.pem \
+		-passin "pass:password" -out $@
+
+name-constraints-permitted-cert.pem: CN = www.example.com
+name-constraints-permitted-cert.pem: SERIAL = 2
+name-constraints-excluded-cert.pem: SERIAL = 3
+name-constraints-dns-san-cert.pem: SERIAL = 4
+name-constraints-email-san-cert.pem: SERIAL = 5
+name-constraints-%-cert.pem: CN = outside.invalid
+name-constraints-%-cert.pem: name-constraints.cnf name-constraints-ca-cert.pem ca1-key.pem agent1-key.pem
+	openssl req -new -config name-constraints.cnf -key agent1-key.pem \
+		-subj "/CN=$(CN)/emailAddress=subject@example.com" \
+		-out name-constraints-$*-csr.pem
+	openssl x509 -req -sha256 -days 99999 -set_serial $(SERIAL) \
+		-in name-constraints-$*-csr.pem \
+		-CA name-constraints-ca-cert.pem -CAkey ca1-key.pem \
+		-passin "pass:password" -extfile name-constraints.cnf \
+		-extensions $* -out $@
+	rm name-constraints-$*-csr.pem
+
+non-canonical-ip-dns-cert.pem: non-canonical-ip-dns-key.pem ca1-cert.pem ca1-key.pem
+	openssl req -new \
+	            -key non-canonical-ip-dns-key.pem \
+	            -out non-canonical-ip-dns-cert.csr \
+	            -sha256 \
+	            -subj "/CN=Example Operator" \
+	            -addext "subjectAltName = DNS:87.0.0.1"
+	openssl x509 -req \
+	             -in non-canonical-ip-dns-cert.csr \
+	             -CA ca1-cert.pem \
+	             -CAkey ca1-key.pem \
+	             -passin "pass:password" \
+	             -set_serial 0x1001 \
+	             -out non-canonical-ip-dns-cert.pem \
+	             -days 99999 \
+	             -copy_extensions copy \
+	             -sha256
+	rm non-canonical-ip-dns-cert.csr
+
+non-canonical-ip-dns-key.pem:
+	openssl ecparam -name prime256v1 -genkey -noout -out non-canonical-ip-dns-key.pem
+
 clean:
-	rm -f *.pfx *.pem *.srl ca2-database.txt ca2-crl-agent3-database.txt* ca2-crl-agent3.cnf ca2-serial fake-startcom-root-serial *.print *.old fake-startcom-root-issued-certs/*.pem
+	rm -f *.pfx $(filter-out blocked-ca-key.pem,$(wildcard *.pem)) *.srl ca2-database.txt ca2-crl-agent3-database.txt* ca2-crl-agent3.cnf ca2-serial fake-startcom-root-serial *.print *.old fake-startcom-root-issued-certs/*.pem
 	@> fake-startcom-root-database.txt
 
 test: agent1-verify agent2-verify agent3-verify agent4-verify agent5-verify agent6-verify agent7-verify agent8-verify agent10-verify ec10-verify

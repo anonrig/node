@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2024-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -10,9 +10,9 @@
 #include "internal/sockets.h"
 #include <openssl/bio.h>
 #include <openssl/err.h>
-#include "internal/thread_once.h"
 #include "internal/rio_notifier.h"
 
+#if !defined(OPENSSL_SYS_WINDOWS) || RIO_NOTIFIER_METHOD == RIO_NOTIFIER_METHOD_SOCKETPAIR
 /*
  * Sets a socket as close-on-exec, except that this is a no-op if we are certain
  * we do not need to do this or the OS does not support the concept.
@@ -25,35 +25,34 @@ static int set_cloexec(int fd)
     return 1;
 #endif
 }
+#endif
 
 #if defined(OPENSSL_SYS_WINDOWS)
 
-static CRYPTO_ONCE ensure_wsa_startup_once = CRYPTO_ONCE_STATIC_INIT;
-static int wsa_started;
-
 static void ossl_wsa_cleanup(void)
 {
-    if (wsa_started) {
-        wsa_started = 0;
-        WSACleanup();
-    }
+    WSACleanup();
 }
 
-DEFINE_RUN_ONCE_STATIC(do_wsa_startup)
+static int do_wsa_startup(void)
 {
     WORD versionreq = 0x0202; /* Version 2.2 */
     WSADATA wsadata;
 
     if (WSAStartup(versionreq, &wsadata) != 0)
         return 0;
-    wsa_started = 1;
-    OPENSSL_atexit(ossl_wsa_cleanup);
+
     return 1;
 }
 
 static ossl_inline int ensure_wsa_startup(void)
 {
-    return RUN_ONCE(&ensure_wsa_startup_once, do_wsa_startup);
+    return do_wsa_startup();
+}
+
+static void wsa_done(void)
+{
+    ossl_wsa_cleanup();
 }
 
 #endif
@@ -340,6 +339,9 @@ void ossl_rio_notifier_cleanup(RIO_NOTIFIER *nfy)
     BIO_closesocket(nfy->wfd);
     BIO_closesocket(nfy->rfd);
     nfy->rfd = nfy->wfd = -1;
+#if defined(OPENSSL_SYS_WINDOWS)
+    wsa_done();
+#endif
 }
 
 int ossl_rio_notifier_signal(RIO_NOTIFIER *nfy)

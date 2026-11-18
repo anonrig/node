@@ -8,6 +8,8 @@
 #include "base_object.h"
 #include "util.h"
 
+#include <utility>
+
 namespace node {
 
 class Environment;
@@ -44,8 +46,11 @@ struct InternalFieldInfoBase {
   template <std::derived_from<InternalFieldInfoBase> T>
   static T* New(EmbedderObjectType type) {
     void* buf = ::operator new[](sizeof(T));
-    memset(buf, 0, sizeof(T));  // Make the padding reproducible.
     T* result = new (buf) T;
+    // Zero the padding to make the bytes handed to V8 reproducible. Must come
+    // after the placement new, or -flifetime-dse drops it as a dead store.
+    // https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html#index-fno-lifetime-dse
+    memset(static_cast<void*>(result), 0, sizeof(T));
     result->type = type;
     result->length = sizeof(T);
     return result;
@@ -136,6 +141,15 @@ void SerializeSnapshotableObjects(Realm* realm,
                                   RealmSerializeInfo* info);
 
 #define DCHECK_IS_SNAPSHOT_SLOT(index) DCHECK_EQ(index, BaseObject::kSlot)
+
+// Implements SnapshotableObject::Serialize() for objects that allocate their
+// InternalFieldInfo in PrepareForSerialization(): ownership of `*info` is
+// handed over to the caller and the field is reset.
+template <typename Info>
+InternalFieldInfoBase* TakeInternalFieldInfo(int index, Info** info) {
+  DCHECK_IS_SNAPSHOT_SLOT(index);
+  return std::exchange(*info, nullptr);
+}
 
 namespace mksnapshot {
 class BindingData : public SnapshotableObject {

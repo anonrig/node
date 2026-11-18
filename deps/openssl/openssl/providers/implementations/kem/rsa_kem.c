@@ -22,10 +22,13 @@
 #include <openssl/err.h>
 #include <openssl/proverr.h>
 #include "crypto/rsa.h"
+#include "internal/cryptlib.h"
+#include "internal/fips.h"
 #include "prov/provider_ctx.h"
 #include "prov/providercommon.h"
 #include "prov/implementations.h"
 #include "prov/securitycheck.h"
+#include "providers/implementations/kem/rsa_kem.inc"
 
 static OSSL_FUNC_kem_newctx_fn rsakem_newctx;
 static OSSL_FUNC_kem_encapsulate_init_fn rsakem_encapsulate_init;
@@ -88,6 +91,12 @@ static void *rsakem_newctx(void *provctx)
     if (!ossl_prov_is_running())
         return NULL;
 
+#ifdef FIPS_MODULE
+    if (!ossl_deferred_self_test(PROV_LIBCTX_OF(provctx),
+            ST_ID_ASYM_CIPHER_RSA_ENC))
+        return NULL;
+#endif
+
     prsactx = OPENSSL_zalloc(sizeof(PROV_RSA_CTX));
     if (prsactx == NULL)
         return NULL;
@@ -131,6 +140,7 @@ static int rsakem_init(void *vprsactx, void *vrsa,
     const char *desc)
 {
     PROV_RSA_CTX *prsactx = (PROV_RSA_CTX *)vprsactx;
+    const BIGNUM *e = NULL;
     int protect = 0;
 
     if (!ossl_prov_is_running())
@@ -145,6 +155,18 @@ static int rsakem_init(void *vprsactx, void *vrsa,
         return 0;
     RSA_free(prsactx->rsa);
     prsactx->rsa = vrsa;
+
+    /*
+     * Reject the trivial public exponent e <= 1. The FIPS module enforces the
+     * full SP 800-56B §6.4.1.1 constraints via ossl_fips_ind_rsa_key_check()
+     * below; non-FIPS callers wanting the complete §6.4.2 vetting can use
+     * EVP_PKEY_public_check().
+     */
+    RSA_get0_key(prsactx->rsa, NULL, &e, NULL);
+    if (e == NULL || BN_cmp(e, BN_value_one()) <= 0) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_KEY);
+        return 0;
+    }
 
     OSSL_FIPS_IND_SET_APPROVED(prsactx)
     if (!rsakem_set_ctx_params(prsactx, params))
@@ -175,45 +197,39 @@ static int rsakem_decapsulate_init(void *vprsactx, void *vrsa,
 static int rsakem_get_ctx_params(void *vprsactx, OSSL_PARAM *params)
 {
     PROV_RSA_CTX *ctx = (PROV_RSA_CTX *)vprsactx;
+    struct rsakem_get_ctx_params_st p;
 
-    if (ctx == NULL)
+    if (ctx == NULL || !rsakem_get_ctx_params_decoder(params, &p))
         return 0;
 
-    if (!OSSL_FIPS_IND_GET_CTX_PARAM(ctx, params))
+    if (!OSSL_FIPS_IND_GET_CTX_FROM_PARAM(ctx, p.ind))
         return 0;
     return 1;
 }
 
-static const OSSL_PARAM known_gettable_rsakem_ctx_params[] = {
-    OSSL_FIPS_IND_GETTABLE_CTX_PARAM()
-        OSSL_PARAM_END
-};
-
 static const OSSL_PARAM *rsakem_gettable_ctx_params(ossl_unused void *vprsactx,
     ossl_unused void *provctx)
 {
-    return known_gettable_rsakem_ctx_params;
+    return rsakem_get_ctx_params_list;
 }
 
 static int rsakem_set_ctx_params(void *vprsactx, const OSSL_PARAM params[])
 {
     PROV_RSA_CTX *prsactx = (PROV_RSA_CTX *)vprsactx;
-    const OSSL_PARAM *p;
+    struct rsakem_set_ctx_params_st p;
     int op;
 
-    if (prsactx == NULL)
+    if (prsactx == NULL || !rsakem_set_ctx_params_decoder(params, &p))
         return 0;
-    if (ossl_param_is_empty(params))
-        return 1;
 
-    if (!OSSL_FIPS_IND_SET_CTX_PARAM(prsactx, OSSL_FIPS_IND_SETTABLE0, params,
-            OSSL_KEM_PARAM_FIPS_KEY_CHECK))
+    if (!OSSL_FIPS_IND_SET_CTX_FROM_PARAM(prsactx, OSSL_FIPS_IND_SETTABLE0,
+            p.ind_k))
         return 0;
-    p = OSSL_PARAM_locate_const(params, OSSL_KEM_PARAM_OPERATION);
-    if (p != NULL) {
-        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+
+    if (p.op != NULL) {
+        if (p.op->data_type != OSSL_PARAM_UTF8_STRING)
             return 0;
-        op = rsakem_opname2id(p->data);
+        op = rsakem_opname2id(p.op->data);
         if (op < 0)
             return 0;
         prsactx->op = op;
@@ -221,16 +237,10 @@ static int rsakem_set_ctx_params(void *vprsactx, const OSSL_PARAM params[])
     return 1;
 }
 
-static const OSSL_PARAM known_settable_rsakem_ctx_params[] = {
-    OSSL_PARAM_utf8_string(OSSL_KEM_PARAM_OPERATION, NULL, 0),
-    OSSL_FIPS_IND_SETTABLE_CTX_PARAM(OSSL_KEM_PARAM_FIPS_KEY_CHECK)
-        OSSL_PARAM_END
-};
-
 static const OSSL_PARAM *rsakem_settable_ctx_params(ossl_unused void *vprsactx,
     ossl_unused void *provctx)
 {
-    return known_settable_rsakem_ctx_params;
+    return rsakem_set_ctx_params_list;
 }
 
 /*
@@ -312,7 +322,7 @@ static int rsasve_generate(PROV_RSA_CTX *prsactx,
      * Step (2): Generate a random byte string z of nlen bytes where
      *            1 < z < n - 1
      */
-    if (!rsasve_gen_rand_bytes(prsactx->rsa, secret, nlen))
+    if (!rsasve_gen_rand_bytes(prsactx->rsa, secret, (int)nlen))
         return 0;
 
     /* Step(3): out = RSAEP((n,e), z) */
@@ -334,7 +344,8 @@ static int rsasve_generate(PROV_RSA_CTX *prsactx,
 /**
  * rsasve_recover - Recovers a secret value from ciphertext using an RSA
  * private key.  Once, recovered, the secret value is considered to be a
- * shared secret.  Algorithm is performed as per NIST SP 800-56B Rev 2
+ * shared secret.  Algorithm is performed as per
+ * NIST SP 800-56B Rev 2
  * 7.2.1.3 RSASVE Recovery Operation (RSASVE.RECOVER).
  *
  * This function performs RSA decryption using the private key from the
@@ -389,8 +400,46 @@ static int rsasve_recover(PROV_RSA_CTX *prsactx,
         return 0;
     }
 
+#ifndef FIPS_MODULE
+    /*
+     * Reject clearly degenerate ciphertexts, c in {0, 1, n-1}.
+     *
+     * SP 800-56B Rev 2, 7.1.2.1 requires RSADP to enforce 1 < c < n-1.  In a
+     * FIPS build that bound is applied by the RSADP primitive itself (see
+     * crypto/rsa/rsa_ossl.c, guarded by FIPS_MODULE), where it is also needed
+     * for KTS-OAEP; the primitive does not apply it in a non-FIPS build, so
+     * enforce it here for RSASVE.  Raise the same errors as the primitive so
+     * the behaviour matches in both builds; keep the two sites in step.
+     */
+    {
+        const BIGNUM *n = RSA_get0_n(prsactx->rsa);
+        BIGNUM *c = BN_new();
+        BIGNUM *nminus1 = BN_new();
+        int reason = 0;
+
+        if (n == NULL || c == NULL || nminus1 == NULL
+            || BN_bin2bn(in, (int)inlen, c) == NULL
+            || BN_copy(nminus1, n) == NULL
+            || !BN_sub_word(nminus1, 1)) {
+            BN_free(c);
+            BN_free(nminus1);
+            return 0;
+        }
+        if (BN_ucmp(c, BN_value_one()) <= 0)
+            reason = RSA_R_DATA_TOO_SMALL;
+        else if (BN_ucmp(c, nminus1) >= 0)
+            reason = RSA_R_DATA_TOO_LARGE_FOR_MODULUS;
+        BN_free(c);
+        BN_free(nminus1);
+        if (reason != 0) {
+            ERR_raise(ERR_LIB_RSA, reason);
+            return 0;
+        }
+    }
+#endif
+
     /* Step (3): out = RSADP((n,d), in) */
-    ret = RSA_private_decrypt(inlen, in, out, prsactx->rsa, RSA_NO_PADDING);
+    ret = RSA_private_decrypt((int)inlen, in, out, prsactx->rsa, RSA_NO_PADDING);
     if (ret > 0 && outlen != NULL)
         *outlen = ret;
     return ret > 0;

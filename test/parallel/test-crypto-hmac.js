@@ -69,19 +69,6 @@ function testHmac(algo, key, data, expected) {
            '19fd6e1ba73d9ed2224dd5094a71babe85d9a892');
 }
 
-{
-  // Historically, dss1 and DSS1 are SHA-1 aliases.
-  const key = '0123456789abcdef';
-  const expected =
-    crypto.createHmac('sha1', key).update('data').digest('hex');
-
-  for (const algo of ['dss1', 'DSS1']) {
-    assert.strictEqual(
-      crypto.createHmac(algo, key).update('data').digest('hex'),
-      expected);
-  }
-}
-
 // Test HMAC (Wikipedia Test Cases)
 const wikipedia = [
   {
@@ -303,6 +290,26 @@ for (let i = 0, l = rfc4231.length; i < l; i++) {
       ` => ${actual} must be ${strRes}`
     );
   }
+}
+
+// Calling digest() after the Hmac has already been used as a stream must
+// return an empty buffer (the DEP0206 repeat-digest guard), not uninitialized
+// stack memory. The stream itself must still produce the correct digest.
+// See: https://github.com/nodejs/node/issues/28245
+{
+  const key = 'key';
+  const data = 'some data to hash';
+
+  const streamHmac = crypto.createHmac('sha256', key);
+  streamHmac.end(data);
+  const streamDigest = streamHmac.read();
+
+  // digest() after the stream already finalized must not return garbage.
+  assert.deepStrictEqual(streamHmac.digest(), Buffer.alloc(0));
+
+  // Sanity check: the stream itself produced the correct digest.
+  const expected = crypto.createHmac('sha256', key).update(data).digest();
+  assert.deepStrictEqual(streamDigest, expected);
 }
 
 // Test HMAC-MD5/SHA1 (rfc 2202 Test Cases)

@@ -1,4 +1,4 @@
-// Flags: --experimental-vfs
+// Flags: --disable-warning=ExperimentalWarning
 'use strict';
 
 // fs.accessSync dispatches to VFS; missing paths throw ENOENT.
@@ -9,11 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const vfs = require('node:vfs');
 
-const mountPoint = path.resolve('/tmp/vfs-accessSync-' + process.pid);
 const myVfs = vfs.create();
 myVfs.mkdirSync('/src', { recursive: true });
 myVfs.writeFileSync('/src/hello.txt', 'hello');
-myVfs.mount(mountPoint);
+const mountPoint = myVfs.mount();
 
 // Existing path succeeds
 fs.accessSync(path.join(mountPoint, 'src/hello.txt'));

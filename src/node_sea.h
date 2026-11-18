@@ -30,6 +30,8 @@ enum class SeaFlags : uint32_t {
   kUseCodeCache = 1 << 2,
   kIncludeAssets = 1 << 3,
   kIncludeExecArgv = 1 << 4,
+  kEnableVfs = 1 << 5,
+  kVfsArchive = 1 << 6,
 };
 
 enum class SeaExecArgvExtension : uint8_t {
@@ -47,6 +49,7 @@ struct SeaConfig {
   ModuleFormat main_format = ModuleFormat::kCommonJS;
   std::unordered_map<std::string, std::string> assets;
   std::vector<std::string> exec_argv;
+  std::string vfs_archive_path;
 };
 
 struct SeaResource {
@@ -61,6 +64,8 @@ struct SeaResource {
 
   bool use_snapshot() const;
   bool use_code_cache() const;
+  bool use_vfs() const;
+  bool use_vfs_archive() const;
 
   static constexpr size_t kHeaderSize = sizeof(kMagic) + sizeof(SeaFlags) +
                                         sizeof(SeaExecArgvExtension) +
@@ -69,7 +74,7 @@ struct SeaResource {
 
 bool IsSingleExecutable();
 std::string_view FindSingleExecutableBlob();
-SeaResource FindSingleExecutableResource();
+const SeaResource& FindSingleExecutableResource();
 std::tuple<int, char**> FixupArgsForSEA(int argc,
                                         char** argv,
                                         std::vector<std::string>* errors);

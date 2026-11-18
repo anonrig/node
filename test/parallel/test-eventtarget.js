@@ -24,7 +24,7 @@ process.on('warning', (e) => {
   lastWarning = e;
 });
 
-// Utility promise for parts of the test that need to wait for eachother -
+// Utility promise for parts of the test that need to wait for each other -
 // Namely tests for warning events
 /* eslint-disable no-unused-vars */
 let asyncTest = Promise.resolve();
@@ -419,6 +419,20 @@ let asyncTest = Promise.resolve();
   target.removeEventListener('foo', a, { capture: false });
   target.dispatchEvent(new Event('foo'));
 }
+
+{
+  const target = new EventTarget();
+  const a = common.mustCall(3);
+
+  target.addEventListener('foo', a, true);
+  target.addEventListener('foo', a, false);
+
+  target.dispatchEvent(new Event('foo'));
+  target.removeEventListener('foo', a, true);
+  target.dispatchEvent(new Event('foo'));
+  target.removeEventListener('foo', a, false);
+  target.dispatchEvent(new Event('foo'));
+}
 {
   const target = new EventTarget();
   assert.strictEqual(target.toString(), '[object EventTarget]');
@@ -685,7 +699,21 @@ let asyncTest = Promise.resolve();
     et.dispatchEvent(new Event('foo'));
   });
 }
-
+{
+  // Two listeners sharing the same retainer key must NOT evict each
+  // other from the weak retention map — both must survive a GC cycle
+  // and both must be removable independently.
+  // Regression test for https://github.com/nodejs/node/issues/63954
+  const et = new EventTarget();
+  const aCalled = common.mustNotCall();
+  const bCalled = common.mustCall();
+  et.addEventListener('a', aCalled, { [kWeakHandler]: et });
+  et.addEventListener('b', bCalled, { [kWeakHandler]: et });
+  globalThis.gc();
+  et.removeEventListener('a', aCalled);
+  et.dispatchEvent(new Event('a'));
+  et.dispatchEvent(new Event('b'));
+}
 {
   const et = new EventTarget();
 
@@ -750,4 +778,35 @@ let asyncTest = Promise.resolve();
   // A null eventInitDict should not throw an error.
   new Event('', null);
   new Event('', undefined);
+}
+
+{
+  // Aborting the signal option only removes the listener that was registered
+  // with the same capture flag.
+  const et = new EventTarget();
+  const controller = new AbortController();
+  let calls = 0;
+  const listener = () => calls++;
+  et.addEventListener('foo', listener, { capture: true, signal: controller.signal });
+  et.addEventListener('foo', listener, false);
+  et.dispatchEvent(new Event('foo'));
+  assert.strictEqual(calls, 2);
+  controller.abort();
+  et.dispatchEvent(new Event('foo'));
+  assert.strictEqual(calls, 3);
+  et.removeEventListener('foo', listener);
+  et.dispatchEvent(new Event('foo'));
+  assert.strictEqual(calls, 3);
+}
+
+{
+  // The isTrusted getter returns false for any receiver that is not a trusted
+  // event, without throwing.
+  const { get } = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
+  for (const value of [
+    undefined, null, 1, 'foo', Symbol('foo'), {}, () => {},
+    { __proto__: Event.prototype }, new Event('foo'), new CustomEvent('foo'),
+  ]) {
+    assert.strictEqual(get.call(value), false);
+  }
 }

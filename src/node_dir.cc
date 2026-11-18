@@ -206,7 +206,7 @@ static MaybeLocal<Array> DirentListToArray(Environment* env,
                                            uv_dirent_t* ents,
                                            int num,
                                            enum encoding encoding) {
-  MaybeStackBuffer<Local<Value>, 64> entries(num * 2);
+  MaybeStackBuffer<Value, 64> entries(env->isolate(), num * 2);
 
   // Return an array of all read filenames.
   int j = 0;
@@ -222,7 +222,8 @@ static MaybeLocal<Array> DirentListToArray(Environment* env,
     entries[j++] = Integer::New(env->isolate(), ents[i].type);
   }
 
-  return Array::New(env->isolate(), entries.out(), j);
+  CHECK_EQ(j, num * 2);
+  return entries.ToArray();
 }
 
 static void AfterDirRead(uv_fs_t* req) {
@@ -247,22 +248,14 @@ static void AfterDirRead(uv_fs_t* req) {
 
   uv_dir_t* dir = static_cast<uv_dir_t*>(req->ptr);
 
-  TryCatch try_catch(isolate);
-  Local<Array> js_array;
-  if (!DirentListToArray(env,
-                         dir->dirents,
-                         static_cast<int>(req->result),
-                         req_wrap->encoding())
-           .ToLocal(&js_array)) {
+  ResolveOrReject(req_wrap.get(), [&]() {
+    MaybeLocal<Array> js_array = DirentListToArray(
+        env, dir->dirents, static_cast<int>(req->result), req_wrap->encoding());
     // Clear libuv resources *before* delivering results to JS land because
-    // that can schedule another operation on the same uv_dir_t. Ditto below.
+    // that can schedule another operation on the same uv_dir_t.
     after.Clear();
-    CHECK(try_catch.CanContinue());
-    return req_wrap->Reject(try_catch.Exception());
-  }
-
-  after.Clear();
-  req_wrap->Resolve(js_array);
+    return js_array;
+  });
 }
 
 

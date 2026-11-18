@@ -6,11 +6,12 @@ const fixtures = require('../common/fixtures');
 if (!common.hasCrypto) {
   common.skip('missing crypto');
 }
-const { hasOpenSSL } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 
 const {
   assert, connect, keys, tls
 } = require(fixtures.path('tls-connect'));
+const { untrustedLeafErrorCode } = require('../common/tls');
 
 // Use ec10 and agent10, they are the only identities with intermediate CAs.
 const client = keys.ec10;
@@ -111,7 +112,7 @@ if (tls.DEFAULT_MAX_VERSION === 'TLSv1.3') connect({
   // and sends a fatal Alert to the client that the client discovers there has
   // been a fatal error.
   pair.client.conn.once('error', common.mustCall((err) => {
-    const expectedErr = process.features.openssl_is_boringssl ?
+    const expectedErr = isBoringSSL ?
       'ERR_SSL_TLSV1_ALERT_CERTIFICATE_REQUIRED' :
       'ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED';
     assert.strictEqual(err.code, expectedErr);
@@ -185,7 +186,7 @@ connect({
     cert: server.single,
   },
 }, common.mustCall((err, pair, cleanup) => {
-  assert.strictEqual(err.code, 'UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  assert.strictEqual(err.code, untrustedLeafErrorCode);
   return cleanup();
 }));
 

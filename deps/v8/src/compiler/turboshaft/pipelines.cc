@@ -5,6 +5,7 @@
 #include "src/compiler/turboshaft/pipelines.h"
 
 #include "src/compiler/pipeline-data-inl.h"
+#include "src/compiler/turboshaft/build-graph-phase.h"
 #include "src/compiler/turboshaft/csa-branch-elimination-phase.h"
 #include "src/compiler/turboshaft/csa-early-machine-optimization-phase.h"
 #include "src/compiler/turboshaft/csa-effects-computation.h"
@@ -13,8 +14,11 @@
 #include "src/compiler/turboshaft/csa-memory-optimization-phase.h"
 #include "src/compiler/turboshaft/debug-feature-lowering-phase.h"
 #include "src/compiler/turboshaft/instruction-selection-normalization-reducer.h"
-#include "src/compiler/turboshaft/int64-lowering-phase.h"
 #include "src/compiler/turboshaft/load-store-simplification-reducer.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/compiler/turboshaft/int64-lowering-phase.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -81,6 +85,21 @@ bool Pipeline::AllocateRegisters(const RegisterConfiguration* config,
 
   RUN_MAYBE_ABORT(DecideSpillingModePhase);
   RUN_MAYBE_ABORT(AssignSpillSlotsPhase);
+
+  // The prologue grows the frame with a single stack pointer decrement, before
+  // the function entry stack check runs. A frame no larger than the smallest OS
+  // page cannot step over a guard page, so bail out rather than emit an
+  // unchecked stack pointer jump of arbitrary size.
+  // When replacing this bailout with a different strategy, consider doing the
+  // same in Maglev as well.
+  constexpr int kMaxStackSlots = 4 * KB / kSystemPointerSize;
+  if (data_->info()->IsOptimizing() &&
+      data_->frame()->GetTotalFrameSlotCount() > kMaxStackSlots) {
+    data_->info()->AbortOptimization(BailoutReason::kFunctionTooBig);
+    data()->ClearRegisterComponent();
+    return false;
+  }
+
   RUN_MAYBE_ABORT(CommitAssignmentPhase);
 
   // TODO(chromium:725559): remove this check once
@@ -167,11 +186,42 @@ void BuiltinPipeline::OptimizeBuiltin() {
 
   CHECK(Run<CsaMemoryOptimizationPhase>());
 
+  CHECK(Run<CodeEliminationAndSimplificationPhase>());
+
   if (v8_flags.turboshaft_enable_debug_features) {
     CHECK(Run<DebugFeatureLoweringPhase>());
   }
-
-  CHECK(Run<CodeEliminationAndSimplificationPhase>());
 }
+
+bool Pipeline::CreateGraphFromTurbofan(compiler::TFPipelineData* turbofan_data,
+                                       Linkage* linkage) {
+  UnparkedScopeIfNeeded scope(
+      data_->broker(),
+      v8_flags.turboshaft_trace_reduction || v8_flags.turboshaft_trace_emitted);
+
+  turboshaft::Tracing::Scope tracing_scope(data_->info());
+
+  ZoneWithNamePointer<SourcePositionTable, kGraphZoneName> source_positions(
+      turbofan_data->source_positions());
+  ZoneWithNamePointer<NodeOriginTable, kGraphZoneName> node_origins(
+      turbofan_data->node_origins());
+  // Save the schedule before releasing the graph zone.
+  Schedule* schedule = turbofan_data->schedule();
+  turbofan_data->reset_schedule();
+
+  data_->InitializeGraphComponentWithGraphZone(
+      turbofan_data->ReleaseGraphZone(), source_positions, node_origins,
+      Graph::Origin::kCreatedFromTurbofan);
+
+  if (std::optional<BailoutReason> bailout =
+          Run<turboshaft::BuildGraphPhase>(schedule, linkage)) {
+    info()->AbortOptimization(*bailout);
+    return false;
+  }
+
+  return true;
+}
+
+#undef RUN_MAYBE_ABORT
 
 }  // namespace v8::internal::compiler::turboshaft

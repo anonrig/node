@@ -25,6 +25,7 @@
 #include "handle_wrap.h"
 #include "node_buffer.h"
 #include "node_external_reference.h"
+#include "node_internals.h"
 #include "stream_base-inl.h"
 #include "stream_wrap.h"
 #include "util-inl.h"
@@ -58,21 +59,27 @@ void TTYWrap::Initialize(Local<Object> target,
 
   Local<String> ttyString = FIXED_ONE_BYTE_STRING(env->isolate(), "TTY");
 
-  Local<FunctionTemplate> t = NewFunctionTemplate(isolate, New);
-  t->SetClassName(ttyString);
-  t->InstanceTemplate()->SetInternalFieldCount(TTYWrap::kInternalFieldCount);
-  t->Inherit(LibuvStreamWrap::GetConstructorTemplate(env));
+  Local<FunctionTemplate> t = env->tty_constructor_template();
+  if (t.IsEmpty()) {
+    t = NewFunctionTemplate(isolate, New);
+    t->SetClassName(ttyString);
+    t->InstanceTemplate()->SetInternalFieldCount(TTYWrap::kInternalFieldCount);
+    t->Inherit(LibuvStreamWrap::GetConstructorTemplate(env));
 
-  SetProtoMethodNoSideEffect(
-      isolate, t, "getWindowSize", TTYWrap::GetWindowSize);
-  SetProtoMethod(isolate, t, "setRawMode", SetRawMode);
+    SetProtoMethodNoSideEffect(
+        isolate, t, "getWindowSize", TTYWrap::GetWindowSize);
+    SetProtoMethod(isolate, t, "setRawMode", SetRawMode);
+    env->set_tty_constructor_template(t);
+  }
 
   SetMethodNoSideEffect(context, target, "isTTY", IsTTY);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_NORMAL);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_IO);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_RAW_VT);
 
   Local<Value> func;
-  if (t->GetFunction(context).ToLocal(&func) &&
-      target->Set(context, ttyString, func).IsJust()) {
-    env->set_tty_constructor_template(t);
+  if (t->GetFunction(context).ToLocal(&func)) {
+    target->Set(context, ttyString, func).Check();
   }
 }
 
@@ -124,9 +131,11 @@ void TTYWrap::SetRawMode(const FunctionCallbackInfo<Value>& args) {
   // sequences at all on Windows, such as bracketed paste mode.
   // The Node.js readline implementation handles differences between
   // these modes.
-  int err = uv_tty_set_mode(
-      &wrap->handle_,
-      args[0]->IsTrue() ? UV_TTY_MODE_RAW_VT : UV_TTY_MODE_NORMAL);
+  Environment* env = Environment::GetCurrent(args);
+  int mode;
+  if (!args[0]->Int32Value(env->context()).To(&mode)) return;
+  int err = uv_tty_set_mode(&wrap->handle_, static_cast<uv_tty_mode_t>(mode));
+  if (err == 0 && mode != UV_TTY_MODE_NORMAL) SetTerminalModeChanged();
   args.GetReturnValue().Set(err);
 }
 

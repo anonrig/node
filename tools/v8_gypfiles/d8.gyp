@@ -16,11 +16,10 @@
       'target_name': 'd8',
       'type': 'executable',
       'dependencies': [
-        'abseil.gyp:abseil',
         'v8.gyp:v8',
         'v8.gyp:v8_libbase',
         'v8.gyp:v8_libplatform',
-        'v8.gyp:generate_bytecode_builtins_list',
+        'v8.gyp:generate_bytecode_builtins_list#target',
         'v8.gyp:fp16',
       ],
       # Generated source files need this explicitly:
@@ -76,6 +75,9 @@
               'AdditionalOptions': ['-fno-lto'],
             },
           },
+        }],
+        ['node_shared_abseil=="false"', {
+          'dependencies': ['abseil.gyp:abseil'],
         }],
       ],
     },

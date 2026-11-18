@@ -6,9 +6,10 @@ BOT_TOKEN=${BOT_TOKEN:-}
 RELEASE_DATE=$1
 RELEASE_LINE=$2
 RELEASER=$3
+RELEASE_VERSION=$4
 
 if [ -z "$RELEASE_DATE" ] || [ -z "$RELEASE_LINE" ]; then
-  echo "Usage: $0 <RELEASE_DATE> <RELEASE_LINE>"
+  echo "Usage: $0 <RELEASE_DATE> <RELEASE_LINE> [<RELEASER> [<RELEASE_VERSION>]]"
   exit 1
 fi
 
@@ -28,16 +29,22 @@ done
 
 set -xe
 
-git node release --prepare --skipBranchDiff --yes --releaseDate "$RELEASE_DATE"
+git node release --prepare --skipBranchDiff --yes --releaseDate "$RELEASE_DATE" \
+  ${RELEASE_VERSION:+--newVersion "$RELEASE_VERSION"}
 
 HEAD_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 HEAD_SHA="$(git rev-parse HEAD^)"
 
 TITLE="$(git log -1 --format=%s)"
 
-TEMP_BODY="$(awk -v MAX_BODY_LENGTH="65536" \
-    "/^## ${RELEASE_DATE}/,/^<a id=/{ if (/^<a id=/) {exit;} if ((output_length += length(\$0)) > MAX_BODY_LENGTH) {exit 1;} print }" \
-    "doc/changelogs/CHANGELOG_V${RELEASE_LINE}.md" || echo "…")"
+# GH rest API has an undocumented limit of 65536 char for the body, setting it
+# to 65534 to account for the ellipsis and the final EOL.
+TEMP_BODY="$(awk -v MAX_BODY_LENGTH="65534" \
+    "/^## ${RELEASE_DATE}/,/^<a id=/{
+      if (/^<a id=/) {exit;}
+      if ((output_length += length(\$0) + 1) > MAX_BODY_LENGTH) {exit 1;}
+      print
+    }" "doc/changelogs/CHANGELOG_V${RELEASE_LINE}.md" || echo "…")"
 
 # Create the proposal branch
 gh api \

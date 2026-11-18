@@ -122,6 +122,13 @@
           # On by default in Clang and V8 requires it at least for arm64.
           '-flax-vector-conversions',
         ],
+        'cflags_cc': [
+          # TODO(joyeecheung): this may be removed after we switch to C++23
+          '-Wno-invalid-constexpr',
+          # V8 uses the clang-only nodebug attribute in
+          # src/execution/simulator.h, which GCC ignores with a warning.
+          '-Wno-attributes',
+        ],
       }],
       ['clang==1 or OS!="win"', {
         'cflags_cc': [
@@ -158,31 +165,12 @@
       ['v8_target_arch=="arm"', {
         'defines': [
           'V8_TARGET_ARCH_ARM',
+          'CAN_USE_ARMV7_INSTRUCTIONS',
+          'CAN_USE_VFP3_INSTRUCTIONS',
+          'CAN_USE_VFP32DREGS',
+          'CAN_USE_NEON',
         ],
         'conditions': [
-          [ 'arm_version==7 or arm_version=="default"', {
-            'defines': [
-              'CAN_USE_ARMV7_INSTRUCTIONS',
-            ],
-          }],
-          [ 'arm_fpu=="vfpv3-d16" or arm_fpu=="default"', {
-            'defines': [
-              'CAN_USE_VFP3_INSTRUCTIONS',
-            ],
-          }],
-          [ 'arm_fpu=="vfpv3"', {
-            'defines': [
-              'CAN_USE_VFP3_INSTRUCTIONS',
-              'CAN_USE_VFP32DREGS',
-            ],
-          }],
-          [ 'arm_fpu=="neon"', {
-            'defines': [
-              'CAN_USE_VFP3_INSTRUCTIONS',
-              'CAN_USE_VFP32DREGS',
-              'CAN_USE_NEON',
-            ],
-          }],
           [ 'arm_test_noprobe=="on"', {
             'defines': [
               'ARM_TEST_NO_FEATURE_PROBE',
@@ -316,7 +304,7 @@
               'V8_TARGET_ARCH_S390_LE_SIM',
             ],
           }, {
-            'cflags': [ '-march=z196' ],
+            'cflags': [ '-march=z14' ],
           }],
           ],
       }],  # s390x
@@ -326,11 +314,11 @@
         ],
         'cflags': [
           '-ffp-contract=off',
+          '-mcpu=power9',
         ],
         'conditions': [
           ['OS=="aix" or OS=="os400"', {
             # Work around AIX ceil, trunc and round oddities.
-            'cflags': [ '-mcpu=power9' ],
             'conditions': [
               ['clang==0', {
                 'cflags': [ '-mfprnd' ],
@@ -532,6 +520,18 @@
           'VCCLCompilerTool': {
             'AdditionalOptions': [
               '/bigobj', # Prevent C1128: number of sections exceeded object file format limit.
+            ],
+          },
+        },
+      }],
+      ['OS=="win" and clang==1', {
+        'msvs_settings': {
+          'VCCLCompilerTool': {
+            'AdditionalOptions': [
+              # When compiling with MSVC STL, V8 can exceed the default
+              # limit of constexpr steps. Increasing it by 4 times to give
+              # it more room.
+              '/clang:-fconstexpr-steps=4194304',
             ],
           },
         },

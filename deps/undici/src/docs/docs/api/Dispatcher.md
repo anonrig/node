@@ -205,10 +205,16 @@ added: v4.0.0
 -->
 
 * `options` {Object}
-  * `origin` {string|URL} (optional) The origin to dispatch the request to.
+  * `origin` {string|URL} The origin to dispatch the request to. Optional for a
+    dispatcher that is already bound to a single origin, such as `Client` or
+    `Pool`, which then use their own origin. Required on `Agent`, which is not
+    bound to one origin and throws an `InvalidArgumentError` when it is missing.
   * `path` {string} The request path.
   * `method` {string} The HTTP method, e.g. `'GET'` or `'POST'`.
   * `body` {string|Buffer|Uint8Array|Readable|FormData|null} The request body.
+    Undici's network clients require a `FormData` body created by the same
+    undici package instance. A body from another source, including Node.js's
+    built-in `FormData`, is rejected with an `InvalidArgumentError`.
     **Default:** `null`.
   * `headers` {UndiciHeaders} Request headers. **Default:** `null`.
   * `query` {Object} Query string parameters embedded into the request URL. Both
@@ -465,6 +471,15 @@ The `body` exposes the following [body mixin][] methods and properties:
 example, calling `text()` after `json()` throws a `TypeError`. The body also
 provides `dump({ limit })`, which discards up to `limit` bytes (default
 `131072`) without destroying the socket.
+
+> [!WARNING]
+> The `arrayBuffer()`, `blob()`, `bytes()`, `json()`, and `text()` methods buffer
+> the entire body in memory before returning. Where applicable, they also decode
+> or parse the payload and retain that representation in memory. Calling these
+> methods therefore means trusting that the body is small enough to fit in the
+> available memory. Do not use them for bodies received from untrusted or
+> user-controlled sources. Instead, process `body` as a `Readable` stream and
+> enforce an application-specific size limit.
 
 The body is always a `Readable`, even when empty. Deserializing an empty body
 with `json()` throws. To guard against this, verify the status code is not `204`
