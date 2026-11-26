@@ -1,8 +1,9 @@
 'use strict';
 
 // URLPatternList emits an ExperimentalWarning once, when it is first
-// constructed. Loading node:util, reading the export, or importing the ESM
-// facade, which reads every export, does not emit it.
+// constructed. Loading node:util, reading the export, importing the ESM
+// facade, which reads every export, or calling the constructor without `new`
+// does not emit it.
 
 const common = require('../common');
 const assert = require('assert');
@@ -17,14 +18,13 @@ process.on('warning', common.mustCall((warning) => {
     'URLPatternList is an experimental feature and might change at any time');
 }));
 
-const kModule = 'NativeModule internal/url_pattern_list';
-const util = require('util');
-assert.ok(!process.moduleLoadList.includes(kModule));
-const { URLPatternList } = util;
-assert.ok(process.moduleLoadList.includes(kModule));
+const { URLPatternList } = require('util');
 
 import('node:util').then(common.mustCall((namespace) => {
   assert.strictEqual(namespace.URLPatternList, URLPatternList);
+  assert.throws(() => URLPatternList([new URLPattern()]), {
+    code: 'ERR_CONSTRUCT_CALL_REQUIRED',
+  });
   setImmediate(common.mustCall(() => {
     constructed = true;
     assert.throws(() => new URLPatternList([]), {

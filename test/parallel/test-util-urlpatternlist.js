@@ -67,6 +67,7 @@ function expectedResult(pattern, ...inputs) {
   }
 
   assert.throws(() => URLPatternList([new URLPattern()]), {
+    code: 'ERR_CONSTRUCT_CALL_REQUIRED',
     name: 'TypeError',
   });
 
@@ -139,13 +140,12 @@ function expectedResult(pattern, ...inputs) {
 
 // Constructor argument validation.
 {
-  const prefix = "Failed to construct 'URLPatternList': ";
   const pattern = new URLPattern({ pathname: '/a' });
 
   assert.throws(() => new URLPatternList(), {
     code: 'ERR_MISSING_ARGS',
     name: 'TypeError',
-    message: `${prefix}1 argument required, but only 0 present.`,
+    message: 'The "patterns" argument must be specified',
   });
 
   for (const value of [undefined, null, 1, true, 'https://example.com/*',
@@ -157,7 +157,8 @@ function expectedResult(pattern, ...inputs) {
     assert.throws(() => new URLPatternList(value), {
       code: 'ERR_INVALID_ARG_TYPE',
       name: 'TypeError',
-      message: `${prefix}patterns cannot be converted to sequence.`,
+      message: 'The "patterns" argument must be an iterable of URLPattern ' +
+               'objects',
     });
   }
 
@@ -171,12 +172,12 @@ function expectedResult(pattern, ...inputs) {
     assert.throws(() => new URLPatternList([value]), {
       code: 'ERR_INVALID_ARG_TYPE',
       name: 'TypeError',
-      message: `${prefix}patterns[0] is not of type URLPattern.`,
+      message: 'The "patterns[0]" argument must be an instance of URLPattern',
     });
     assert.throws(() => new URLPatternList([pattern, value]), {
       code: 'ERR_INVALID_ARG_TYPE',
       name: 'TypeError',
-      message: `${prefix}patterns[1] is not of type URLPattern.`,
+      message: 'The "patterns[1]" argument must be an instance of URLPattern',
     });
   }
 
@@ -192,9 +193,15 @@ function expectedResult(pattern, ...inputs) {
   }
   assert.throws(() => new URLPatternList(generate()), {
     code: 'ERR_INVALID_ARG_TYPE',
-    message: `${prefix}patterns[1] is not of type URLPattern.`,
+    message: 'The "patterns[1]" argument must be an instance of URLPattern',
   });
   assert.strictEqual(yielded, 2);
+
+  // The whole iterable is converted before duplicates are looked for.
+  assert.throws(() => new URLPatternList([pattern, pattern, '/b']), {
+    code: 'ERR_INVALID_ARG_TYPE',
+    message: 'The "patterns[2]" argument must be an instance of URLPattern',
+  });
 
   // Errors thrown while iterating are propagated.
   const error = new Error('boom');
@@ -220,7 +227,8 @@ function expectedResult(pattern, ...inputs) {
     assert.throws(() => new URLPatternList(value), {
       code: 'ERR_INVALID_ARG_VALUE',
       name: 'TypeError',
-      message: /^The argument 'patterns' must not contain the same URLPattern more than once\. Received /,
+      message: 'The "patterns" argument must not contain the same ' +
+               'URLPattern more than once',
     });
   }
 
@@ -229,7 +237,7 @@ function expectedResult(pattern, ...inputs) {
     assert.throws(() => new URLPatternList(value), {
       code: 'ERR_INVALID_ARG_VALUE',
       name: 'TypeError',
-      message: /^The argument 'patterns' must not be empty\. Received /,
+      message: 'The "patterns" argument must not be empty',
     });
   }
 }
@@ -632,12 +640,12 @@ function expectedResult(pattern, ...inputs) {
                      { __proto__: URLPatternList.prototype }];
   for (const receiver of receivers) {
     assert.throws(() => test.call(receiver), {
-      code: 'ERR_INVALID_THIS',
       name: 'TypeError',
+      message: 'Illegal invocation',
     });
     assert.throws(() => exec.call(receiver), {
-      code: 'ERR_INVALID_THIS',
       name: 'TypeError',
+      message: 'Illegal invocation',
     });
   }
 }

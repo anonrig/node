@@ -5,11 +5,13 @@
 #include "node.h"
 #include "node_errors.h"
 #include "node_mem-inl.h"
+#include "node_process.h"
 #include "path.h"
 #include "util-inl.h"
 
 #include <iterator>
 #include <span>
+#include <unordered_set>
 
 namespace node {
 using node::url_pattern::URLPatternRegexProvider;
@@ -59,9 +61,12 @@ using v8::Array;
 using v8::Context;
 using v8::DictionaryTemplate;
 using v8::DontDelete;
+using v8::DontEnum;
+using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
 using v8::Global;
+using v8::HandleScope;
 using v8::Isolate;
 using v8::Local;
 using v8::LocalVector;
@@ -74,6 +79,7 @@ using v8::ReadOnly;
 using v8::RegExp;
 using v8::Signature;
 using v8::String;
+using v8::Symbol;
 using v8::Value;
 
 std::optional<URLPatternRegexProvider::regex_type>
@@ -771,6 +777,87 @@ ada::result<std::optional<URLPatternList::Components>> ProcessMatchInput(
   }
   return components;
 }
+
+// Converts `value` to a WebIDL sequence<URLPattern>. Per WebIDL, any iterable
+// is read through its iterator, including arrays, and the conversion stops at
+// the first value that is not a URLPattern. Returns false if a JavaScript
+// exception is pending.
+// https://webidl.spec.whatwg.org/#js-sequence
+bool ToURLPatternSequence(Environment* env,
+                          Local<Value> value,
+                          std::vector<BaseObjectPtr<URLPattern>>* patterns) {
+  static constexpr std::string_view kNotIterable =
+      "The \"patterns\" argument must be an iterable of URLPattern objects";
+  Isolate* isolate = env->isolate();
+  Local<Context> context = env->context();
+
+  if (!value->IsObject()) {
+    THROW_ERR_INVALID_ARG_TYPE(env, kNotIterable);
+    return false;
+  }
+  Local<Object> iterable = value.As<Object>();
+  Local<Value> method;
+  if (!iterable->Get(context, Symbol::GetIterator(isolate)).ToLocal(&method)) {
+    return false;
+  }
+  if (!method->IsFunction()) {
+    THROW_ERR_INVALID_ARG_TYPE(env, kNotIterable);
+    return false;
+  }
+  Local<Value> iterator;
+  if (!method.As<Function>()
+           ->Call(context, iterable, 0, nullptr)
+           .ToLocal(&iterator)) {
+    return false;
+  }
+  if (!iterator->IsObject()) {
+    THROW_ERR_INVALID_ARG_TYPE(env, kNotIterable);
+    return false;
+  }
+  Local<Value> next;
+  if (!iterator.As<Object>()->Get(context, env->next_string()).ToLocal(&next)) {
+    return false;
+  }
+  if (!next->IsFunction()) {
+    THROW_ERR_INVALID_ARG_TYPE(env, kNotIterable);
+    return false;
+  }
+
+  while (true) {
+    HandleScope handle_scope(isolate);
+    Local<Value> result;
+    if (!next.As<Function>()
+             ->Call(context, iterator, 0, nullptr)
+             .ToLocal(&result)) {
+      return false;
+    }
+    if (!result->IsObject()) {
+      THROW_ERR_INVALID_ARG_TYPE(env, kNotIterable);
+      return false;
+    }
+    Local<Value> done;
+    if (!result.As<Object>()->Get(context, env->done_string()).ToLocal(&done)) {
+      return false;
+    }
+    if (done->BooleanValue(isolate)) {
+      return true;
+    }
+    Local<Value> item;
+    if (!result.As<Object>()
+             ->Get(context, env->value_string())
+             .ToLocal(&item)) {
+      return false;
+    }
+    if (!URLPattern::HasInstance(env, item)) {
+      THROW_ERR_INVALID_ARG_TYPE(
+          env,
+          "The \"patterns[%d]\" argument must be an instance of URLPattern",
+          patterns->size());
+      return false;
+    }
+    patterns->emplace_back(BaseObject::Unwrap<URLPattern>(item));
+  }
+}
 }  // namespace
 
 URLPatternList::URLPatternList(
@@ -869,24 +956,44 @@ void URLPatternList::MemoryInfo(MemoryTracker* tracker) const {
 
 void URLPatternList::New(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  CHECK(args.IsConstructCall());
-  // lib/internal/url_pattern_list.js has already converted the argument to a
-  // non-empty sequence<URLPattern> without duplicates.
-  CHECK(args[0]->IsArray());
-  Local<Array> array = args[0].As<Array>();
-  uint32_t length = array->Length();
-  CHECK_GT(length, 0);
+  if (!args.IsConstructCall()) {
+    THROW_ERR_CONSTRUCT_CALL_REQUIRED(env);
+    return;
+  }
+  if (env->EmitURLPatternListWarning() &&
+      ProcessEmitWarningGeneric(env,
+                                "URLPatternList is an experimental feature and "
+                                "might change at any time",
+                                "ExperimentalWarning")
+          .IsNothing()) {
+    return;
+  }
+  if (args.Length() < 1) {
+    THROW_ERR_MISSING_ARGS(env, "The \"patterns\" argument must be specified");
+    return;
+  }
 
   std::vector<BaseObjectPtr<URLPattern>> patterns;
-  patterns.reserve(length);
-  for (uint32_t i = 0; i < length; i++) {
-    Local<Value> value;
-    if (!array->Get(env->context(), i).ToLocal(&value)) {
+  if (!ToURLPatternSequence(env, args[0], &patterns)) {
+    return;
+  }
+
+  std::unordered_set<URLPattern*> seen;
+  seen.reserve(patterns.size());
+  for (const auto& pattern : patterns) {
+    if (!seen.insert(pattern.get()).second) {
+      THROW_ERR_INVALID_ARG_VALUE(env,
+                                  "The \"patterns\" argument must not contain "
+                                  "the same URLPattern more than once");
       return;
     }
-    CHECK(URLPattern::HasInstance(env, value));
-    patterns.emplace_back(BaseObject::Unwrap<URLPattern>(value));
   }
+  if (patterns.empty()) {
+    THROW_ERR_INVALID_ARG_VALUE(env,
+                                "The \"patterns\" argument must not be empty");
+    return;
+  }
+
   new URLPatternList(env, args.This(), std::move(patterns));
 }
 
@@ -951,11 +1058,6 @@ void URLPatternList::Test(const FunctionCallbackInfo<Value>& args) {
                             list->FindMatch(**components, true).has_value());
 }
 
-static void IsURLPattern(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  args.GetReturnValue().Set(URLPattern::HasInstance(env, args[0]));
-}
-
 static void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(URLPattern::New);
 #define URL_PATTERN_COMPONENT_GETTERS(uppercase_name, _)                       \
@@ -968,7 +1070,6 @@ static void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(URLPatternList::New);
   registry->Register(URLPatternList::Exec);
   registry->Register(URLPatternList::Test);
-  registry->Register(IsURLPattern);
 }
 
 Local<FunctionTemplate> URLPattern::GetConstructorTemplate(Environment* env) {
@@ -1041,13 +1142,19 @@ static void Initialize(Local<Object> target,
                          SetConstructorFunctionFlag::NONE);
 
   auto list_tmpl = NewFunctionTemplate(isolate, URLPatternList::New);
+  // The `patterns` argument is required.
+  list_tmpl->SetLength(1);
   list_tmpl->InstanceTemplate()->SetInternalFieldCount(
       URLPatternList::kInternalFieldCount);
-  SetProtoMethodNoSideEffect(isolate, list_tmpl, "exec", URLPatternList::Exec);
+  Local<String> url_pattern_list_string =
+      FIXED_ONE_BYTE_STRING(isolate, "URLPatternList");
+  list_tmpl->PrototypeTemplate()->Set(
+      Symbol::GetToStringTag(isolate),
+      url_pattern_list_string,
+      static_cast<PropertyAttribute>(ReadOnly | DontEnum));
   SetProtoMethodNoSideEffect(isolate, list_tmpl, "test", URLPatternList::Test);
-  SetConstructorFunction(context, target, "URLPatternList", list_tmpl);
-
-  SetMethodNoSideEffect(context, target, "isURLPattern", IsURLPattern);
+  SetProtoMethodNoSideEffect(isolate, list_tmpl, "exec", URLPatternList::Exec);
+  SetConstructorFunction(context, target, url_pattern_list_string, list_tmpl);
 }
 
 }  // namespace node::url_pattern

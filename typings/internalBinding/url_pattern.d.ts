@@ -16,7 +16,7 @@ export class URLPattern {
 }
 
 export class URLPatternList {
-  constructor(patterns: URLPattern[]);
+  constructor(patterns: Iterable<URLPattern>);
 
   exec(input?: string | Record<string, string> | null, baseURL?: string | null): null | Record<string, unknown>;
   test(input?: string | Record<string, string> | null, baseURL?: string | null): boolean;
@@ -25,5 +25,4 @@ export class URLPatternList {
 export interface URLPatternBinding {
   URLPattern: URLPattern;
   URLPatternList: URLPatternList;
-  isURLPattern(value: unknown): value is URLPattern;
 }

@@ -126,7 +126,7 @@ class URLPattern : public BaseObject {
 #undef URL_PATTERN_CACHED_VALUES
 };
 
-// The native side of util.URLPatternList, which is specified in
+// util.URLPatternList, which is specified in
 // https://github.com/whatwg/urlpattern/pull/166. The list matches an input
 // against its patterns in list order and reports the first one that matches.
 class URLPatternList : public BaseObject {
