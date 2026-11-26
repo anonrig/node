@@ -755,6 +755,8 @@ console.log(myPattern.test('https://nodejs.org/docs/latest/api/dns.html'));
 // Prints: true
 ```
 
+To find which of several patterns matches a URL, see [`util.URLPatternList`][].
+
 #### `new URLPattern()`
 
 Instantiate a new empty `URLPattern` object.
@@ -2120,6 +2122,7 @@ console.log(myURL.origin);
 [`url.toString()`]: #urltostring
 [`urlSearchParams.entries()`]: #urlsearchparamsentries
 [`urlSearchParamsSymbol.iterator()`]: #urlsearchparamssymboliterator
+[`util.URLPatternList`]: util.md#class-utilurlpatternlist
 [converted to a string]: https://tc39.es/ecma262/#sec-tostring
 [examples of parsed URLs]: https://url.spec.whatwg.org/#example-url-parsing
 [host name spoofing]: https://hackerone.com/reports/678487

@@ -15,6 +15,15 @@ export class URLPattern {
   test(input: string | Record<string, string>, baseURL?: string): boolean;
 }
 
+export class URLPatternList {
+  constructor(patterns: URLPattern[]);
+
+  exec(input?: string | Record<string, string> | null, baseURL?: string | null): null | Record<string, unknown>;
+  test(input?: string | Record<string, string> | null, baseURL?: string | null): boolean;
+}
+
 export interface URLPatternBinding {
   URLPattern: URLPattern;
+  URLPatternList: URLPatternList;
+  isURLPattern(value: unknown): value is URLPattern;
 }
